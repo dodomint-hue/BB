@@ -533,6 +533,7 @@
           </div>
         </div>
       </div>
+      <div id="hmFloorWrap" style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-bottom:10px;"></div>
       <div class="heatmap-wrap" id="heatmap"></div>
       <div class="hm-legend">
         <span>0%</span>
@@ -559,10 +560,25 @@
     <div class="card" id="dailyCompareCard" style="margin-top:16px;">
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
         <div class="card-title" style="white-space:nowrap;">업체별 진척률 비교</div>
+        <span style="font-size:10px;color:#999;white-space:nowrap;">진척률=기간 진행 · 공수/인원=기간 합계</span>
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-left:auto;">
-          <label style="font-size:11px;color:#666;white-space:nowrap;">비교일</label>
+          <div id="dcPresetWrap" style="display:inline-flex;border:1px solid #d1d5db;border-radius:5px;overflow:hidden;">
+            <button class="dc-preset" data-preset="today" style="border:none;background:#fff;color:#555;font-size:11px;padding:4px 10px;cursor:pointer;">오늘</button>
+            <button class="dc-preset" data-preset="week" style="border:none;border-left:1px solid #d1d5db;background:#fff;color:#555;font-size:11px;padding:4px 10px;cursor:pointer;">이번주</button>
+            <button class="dc-preset" data-preset="month" style="border:none;border-left:1px solid #d1d5db;background:#fff;color:#555;font-size:11px;padding:4px 10px;cursor:pointer;">이번달</button>
+          </div>
+          <label style="font-size:11px;color:#666;white-space:nowrap;">공정</label>
+          <select id="dcCat" style="height:26px;border:1px solid #d1d5db;border-radius:4px;padding:0 6px;font-size:12px;background:#fff;cursor:pointer;">
+            <option value="ALL">전체 공정</option>
+            <option value="BULK">BULK</option>
+            <option value="S-GAS">S-GAS</option>
+            <option value="UPW">UPW</option>
+            <option value="VACUUM">VACUUM</option>
+            <option value="CHEMICAL">CHEMICAL</option>
+          </select>
+          <label style="font-size:11px;color:#666;white-space:nowrap;">기간</label>
           <input type="date" id="dcDateA" style="height:26px;border:1px solid #d1d5db;border-radius:4px;padding:0 6px;font-size:12px;">
-          <span style="color:#999;font-size:12px;">→</span>
+          <span style="color:#999;font-size:12px;">~</span>
           <input type="date" id="dcDateB" style="height:26px;border:1px solid #d1d5db;border-radius:4px;padding:0 6px;font-size:12px;">
           <button id="dcApply" style="height:26px;background:#14B446;color:#fff;border:none;border-radius:4px;padding:0 10px;font-size:12px;cursor:pointer;">조회</button>
           <span id="dcCstBadge" style="font-size:10px;background:#e8f5e9;color:#2E7D32;padding:2px 7px;border-radius:10px;white-space:nowrap;">CST 기준</span>
@@ -639,11 +655,20 @@ function _cat(v) {
   if (/WELDER|TIG|AUTO/i.test(s)) return '용접사';
   return v.split(',')[0].trim();
 }
-function _shift(v) {
+function _shiftType(v) {
   const s = String(v||'');
-  if (s.includes('반차')) return 0.5;
-  if (s.includes('연장') || s.includes('+2hr')) return 1.25;
-  return 1.0;
+  if (s.includes('반차')) return '반차';
+  if (s.includes('야간')) return '야간';
+  if (s.includes('연장') || s.includes('+2hr')) return '연장';
+  return '주간';
+}
+function _shift(v) {
+  switch (_shiftType(v)) {
+    case '반차': return 0.5;
+    case '야간': return 2.1;   // 야간 가중
+    case '연장': return 1.55;  // 연장 가중
+    default:     return 1.0;   // 주간/기본
+  }
 }
 // ── 설비명 파싱: 복수 설비는 각각 분리 ─────────────────────────────
 function _parseEquips(raw) {
@@ -682,6 +707,7 @@ function xlsxToRecords(wb) {
     const floor = r[H['작업 위치 - 층 [작업위치]']] ? String(r[H['작업 위치 - 층 [작업위치]']]).trim() : null;
     const col   = r[H['작업 위치 - 기둥']] ? String(r[H['작업 위치 - 기둥']]).trim() : null;
     const worker= String(r[H['성함']]||'').trim();
+    const shType= _shiftType(r[H['근무 형태']]);
     const md    = _shift(r[H['근무 형태']]);
     const prog  = (!isW) ? _prog(pRaw) : null;
 
@@ -700,6 +726,7 @@ function xlsxToRecords(wb) {
         m: parseFloat((md / eqCount).toFixed(4))
       };
       if (prog != null) rec.p = prog;
+      if (shType !== '주간') rec.sh = shType;
       if (wpSum) rec.wp = wpSum;
       if (supVal) rec.s = supVal;
       if (noteVal) rec.note = noteVal;
@@ -713,23 +740,27 @@ function xlsxToRecords(wb) {
   return out;
 }
 
-// ── 누적 병합 ─────────────────────────────────────────────────────────
+// ── 누적 병합 (재업로드 시 동일 키는 최신값으로 갱신) ─────────────────
 function mergeInto(existing, incoming) {
-  const tsSet   = new Set(existing.filter(r=>r._ts).map(r=>r._ts));
-  const fallSet = new Set(existing.filter(r=>!r._ts).map(r=>r.d+'|'+r.w+'|'+r.e));
-  let added = 0;
+  // _ts (없으면 d|w|e) 기준 인덱스
+  const idx = new Map();
+  existing.forEach((r, i) => {
+    const k = r._ts ? ('ts:' + r._ts) : ('k:' + r.d + '|' + r.w + '|' + r.e);
+    idx.set(k, i);
+  });
+  let added = 0, updated = 0;
   for (const r of incoming) {
-    if (r._ts) {
-      if (tsSet.has(r._ts)) continue;
-      tsSet.add(r._ts);
+    const k = r._ts ? ('ts:' + r._ts) : ('k:' + r.d + '|' + r.w + '|' + r.e);
+    if (idx.has(k)) {
+      existing[idx.get(k)] = r;   // 재업로드 → 최신값으로 덮어쓰기(공수 가중치 등 갱신)
+      updated++;
     } else {
-      const k = r.d+'|'+r.w+'|'+r.e;
-      if (fallSet.has(k)) continue;
-      fallSet.add(k);
+      idx.set(k, existing.length);
+      existing.push(r);
+      added++;
     }
-    existing.push(r); added++;
   }
-  return added;
+  return { added, updated };
 }
 
 // ── 전일/금일 비교 렌더 ───────────────────────────────────────────────
@@ -756,29 +787,74 @@ function cstYesterday() {
   return y+'-'+String(m).padStart(2,'0')+'-'+String(d).padStart(2,'0');
 }
 
+// 기술인 섹션 작업위치(층) 선택
+function dcSetFloor(f) {
+  window._dcFloor = f;
+  const b = document.getElementById('dcApply');
+  if (b) b.click();
+}
+
 function renderDailyCompare(recs, dateA, dateB) {
   const el = document.getElementById('dailyCompareTable');
   if (!el) return;
 
-  // dateB = 금일(기준), dateA = 비교일(전일)
-  const useDateB = dateB || cstToday();
-  const useDateA = dateA || null;
+  const today = cstToday();
+
+  // ── 기간 비교 ──────────────────────────────────────────────────
+  //  [pStart .. pEnd] 기간 동안의 진행분을 본다.
+  //   · 시작 시점 진척률 = 기간 진입 직전(pStart-1)까지의 누적
+  //   · 종료 시점 진척률 = pEnd 까지의 누적
+  //   · 기간 진행 = 종료 - 시작,  공수/인원 = 기간[pStart..pEnd] 합계
+  let pEnd   = dateB || today;
+  let pStart = dateA || pEnd;
+  if (pEnd > today)   pEnd = today;
+  if (pStart > pEnd)  pStart = pEnd;          // 시작>종료 보정
+  const baseDate = addDaysStr(pStart, -1);    // 기간 진입 직전일
+  const useDateB = pEnd;                        // Top10 / 미투입 종료 기준
 
   const VENDORS = ['주민','동영','새로','제이엠'];
   const VC = {'주민':'#2E7D32','동영':'#fd7e14','새로':'#4e8ef7','제이엠':'#6f42c1'};
 
+  // 공정(공종) 필터: 'ALL' 또는 BULK/S-GAS/UPW/VACUUM/CHEMICAL
+  const _dcCatEl = document.getElementById('dcCat');
+  const dcCat = (_dcCatEl && _dcCatEl.value) ? _dcCatEl.value : 'ALL';
+  const catOK = (r) => dcCat === 'ALL' || normalizeCategory(r.c) === dcCat;
+
+  // 진척률(누적, A타입): 해당 날짜까지 업체가 보고한
+  //   설비×공종별 누적 max → 설비별 평균(공종 max 평균) → 업체별 설비 평균
   const avgP = (date, v) => {
     if (!date) return null;
-    const rs = recs.filter(r=>r.d===date&&r.v===v&&typeof r.p==='number'&&r.c!=='용접사');
-    return rs.length ? rs.reduce((s,r)=>s+r.p,0)/rs.length : null;
+    const rs = recs.filter(r =>
+      r.d && r.d <= date && r.v === v &&
+      typeof r.p === 'number' && r.c !== '용접사' &&
+      normalizeCategory(r.c) && isValidEquip(r.e) && catOK(r)
+    );
+    if (!rs.length) return null;
+    // 설비 → (공종 → 누적 max p)
+    const byEq = new Map();
+    for (const r of rs) {
+      const c = normalizeCategory(r.c);
+      if (!byEq.has(r.e)) byEq.set(r.e, new Map());
+      const cm = byEq.get(r.e);
+      if (r.p > (cm.get(c) ?? -Infinity)) cm.set(c, r.p);
+    }
+    let tot = 0, n = 0;
+    for (const cm of byEq.values()) {
+      let s = 0;
+      for (const p of cm.values()) s += Math.min(1, p);
+      tot += s / cm.size;   // 설비 진척률 = 공종별 max 평균
+      n++;
+    }
+    return n ? tot / n : null;   // 업체 진척률 = 설비 평균
   };
-  const totMD = (date, v) => {
-    if (!date) return 0;
-    return recs.filter(r=>r.d===date&&r.v===v).reduce((s,r)=>s+(r.m||0),0);
+  // 공수/인원: 기간[start..end] 합계 (일간이면 하루, 주간이면 한 주)
+  const totMD = (start, end, v) => {
+    if (!start || !end) return 0;
+    return recs.filter(r=>r.d>=start&&r.d<=end&&r.v===v&&catOK(r)).reduce((s,r)=>s+(r.m||0),0);
   };
-  const workerCnt = (date, v) => {
-    if (!date) return 0;
-    return new Set(recs.filter(r=>r.d===date&&r.v===v&&r.w).map(r=>r.w)).size;
+  const workerCnt = (start, end, v) => {
+    if (!start || !end) return 0;
+    return new Set(recs.filter(r=>r.d>=start&&r.d<=end&&r.v===v&&r.w&&catOK(r)).map(r=>r.w)).size;
   };
 
   const bar = (p, color) => p!=null
@@ -788,62 +864,57 @@ function renderDailyCompare(recs, dateA, dateB) {
       + '<span style="min-width:35px;font-size:12px;font-weight:500;">'+Math.round(p*100)+'%</span></div>'
     : '<span style="color:#ccc;font-size:12px;">─</span>';
 
-  const hasA = !!useDateA;
-  const aLabel = hasA ? useDateA : '비교일 없음';
-  const bLabel = useDateB;
+  const _md = s => { const p = (s||'').split('-'); return p.length===3 ? (+p[1])+'/'+(+p[2]) : s; };
+  const periodLabel = (pStart === pEnd) ? _md(pStart) : (_md(pStart) + ' ~ ' + _md(pEnd));
 
-  let h = '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12px;">';
-  h += '<thead>'
-     + '<tr style="background:#f8f9fa;">'
-     + '<th rowspan="2" style="padding:7px 12px;text-align:left;border-bottom:2px solid #e5e7eb;white-space:nowrap;vertical-align:middle;">업체</th>'
-     + (hasA ? '<th colspan="3" style="padding:5px 12px;text-align:center;border-bottom:1px solid #e5e7eb;border-right:1px solid #e5e7eb;color:#888;font-weight:400;">'+aLabel+'</th>' : '')
-     + '<th colspan="3" style="padding:5px 12px;text-align:center;border-bottom:1px solid #e5e7eb;'+(hasA?'border-right:1px solid #e5e7eb;':'')+' color:#2E7D32;font-weight:500;">'+bLabel+' (금일)</th>'
-     + (hasA ? '<th rowspan="2" style="padding:7px 12px;text-align:center;border-bottom:2px solid #e5e7eb;white-space:nowrap;vertical-align:middle;">변화</th>' : '')
-     + '</tr>'
-     + '<tr style="background:#f8f9fa;">'
-     + (hasA ? '<th style="padding:5px 12px;text-align:left;border-bottom:2px solid #e5e7eb;white-space:nowrap;color:#888;font-weight:400;">진척률</th>'
-              +'<th style="padding:5px 12px;text-align:center;border-bottom:2px solid #e5e7eb;white-space:nowrap;color:#888;font-weight:400;">공수</th>'
-              +'<th style="padding:5px 12px;text-align:center;border-bottom:2px solid #e5e7eb;white-space:nowrap;color:#888;font-weight:400;border-right:1px solid #e5e7eb;">인원</th>' : '')
-     + '<th style="padding:5px 12px;text-align:left;border-bottom:2px solid #e5e7eb;white-space:nowrap;">진척률</th>'
-     + '<th style="padding:5px 12px;text-align:center;border-bottom:2px solid #e5e7eb;white-space:nowrap;">공수</th>'
-     + '<th style="padding:5px 12px;text-align:center;border-bottom:2px solid #e5e7eb;white-space:nowrap;'+(hasA?'border-right:1px solid #e5e7eb;':'')+'">인원</th>'
-     + '</tr>'
-     + '</thead><tbody>';
+  let h = '<div style="font-size:11px;color:#888;margin-bottom:6px;">기간 <b style="color:#2E7D32;">'+periodLabel+'</b> 동안의 진행 · 시작 시점 = 기간 직전 누적</div>';
+  h += '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12px;">';
+  h += '<thead><tr style="background:#f8f9fa;">'
+     + '<th style="padding:7px 12px;text-align:left;border-bottom:2px solid #e5e7eb;white-space:nowrap;">업체</th>'
+     + '<th style="padding:7px 12px;text-align:left;border-bottom:2px solid #e5e7eb;white-space:nowrap;color:#888;font-weight:400;">시작 시점</th>'
+     + '<th style="padding:7px 12px;text-align:left;border-bottom:2px solid #e5e7eb;white-space:nowrap;color:#2E7D32;font-weight:500;border-right:1px solid #e5e7eb;">종료 시점</th>'
+     + '<th style="padding:7px 12px;text-align:center;border-bottom:2px solid #e5e7eb;white-space:nowrap;">기간 진행</th>'
+     + '<th style="padding:7px 12px;text-align:center;border-bottom:2px solid #e5e7eb;white-space:nowrap;">공수</th>'
+     + '<th style="padding:7px 12px;text-align:center;border-bottom:2px solid #e5e7eb;white-space:nowrap;">인원</th>'
+     + '</tr></thead><tbody>';
 
   for (const v of VENDORS) {
-    const bp=avgP(useDateB,v), ap=hasA?avgP(useDateA,v):null;
-    const bm=totMD(useDateB,v), am=hasA?totMD(useDateA,v):0;
-    const bw=workerCnt(useDateB,v), aw=hasA?workerCnt(useDateA,v):0;
-    const dot='<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'+(VC[v]||'#888')+';margin-right:6px;vertical-align:middle;"></span>';
-    let change = '';
-    if (hasA) {
-      if (bp!=null&&ap!=null) {
-        const diff=bp-ap, sign=diff>0?'▲':diff<0?'▼':'─', col=diff>0?'#2E7D32':diff<0?'#dc3545':'#888';
-        change='<td style="text-align:center;color:'+col+';font-weight:600;padding:8px 12px;white-space:nowrap;">'+sign+' '+Math.abs(Math.round(diff*100))+'%</td>';
-      } else change='<td style="text-align:center;color:#ccc;padding:8px 12px;">─</td>';
+    const sp = avgP(baseDate, v);                       // 시작 시점(직전 누적)
+    const ep = avgP(pEnd, v);                            // 종료 시점
+    const spCalc = (sp == null && ep != null) ? 0 : sp;  // 기간 중 신규 착수 → 0 기준
+    const md = totMD(pStart, pEnd, v);
+    const wc = workerCnt(pStart, pEnd, v);
+    const dot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'+(VC[v]||'#888')+';margin-right:6px;vertical-align:middle;"></span>';
+
+    let change = '<td style="text-align:center;color:#ccc;padding:8px 12px;">─</td>';
+    if (ep != null && spCalc != null) {
+      const diff = ep - spCalc;
+      const sign = diff > 0 ? '▲' : diff < 0 ? '▼' : '─';
+      const col  = diff > 0 ? '#2E7D32' : diff < 0 ? '#dc3545' : '#888';
+      change = '<td style="text-align:center;color:'+col+';font-weight:600;padding:8px 12px;white-space:nowrap;">'+sign+' '+Math.abs(Math.round(diff*100))+'%</td>';
     }
+
     h += '<tr style="border-bottom:1px solid #f3f4f6;">'
        + '<td style="padding:9px 12px;white-space:nowrap;font-weight:500;">'+dot+v+'</td>'
-       + (hasA ? '<td style="padding:9px 12px;">'+bar(ap,VC[v]||'#888')+'</td>'
-                +'<td style="text-align:center;padding:9px 12px;color:#888;">'+(am?am.toFixed(1):'─')+'</td>'
-                +'<td style="text-align:center;padding:9px 12px;color:#888;border-right:1px solid #f0f0f0;">'+(aw||'─')+'명</td>' : '')
-       + '<td style="padding:9px 12px;">'+bar(bp,VC[v]||'#888')+'</td>'
-       + '<td style="text-align:center;padding:9px 12px;font-weight:500;">'+(bm?bm.toFixed(1):'─')+'</td>'
-       + '<td style="text-align:center;padding:9px 12px;'+(hasA?'border-right:1px solid #f0f0f0;':'')+'font-weight:500;">'+(bw||'─')+'명</td>'
-       + change+'</tr>';
+       + '<td style="padding:9px 12px;">'+bar(sp,VC[v]||'#888')+'</td>'
+       + '<td style="padding:9px 12px;border-right:1px solid #f0f0f0;">'+bar(ep,VC[v]||'#888')+'</td>'
+       + change
+       + '<td style="text-align:center;padding:9px 12px;font-weight:500;">'+(md?md.toFixed(1):'─')+'</td>'
+       + '<td style="text-align:center;padding:9px 12px;font-weight:500;">'+(wc||'─')+'명</td>'
+       + '</tr>';
   }
   h += '</tbody></table></div>';
 
-  // ── Top 10 변화 섹션 (비교일이 있을 때만) ─────────────────────────
-  if (hasA) {
-    // 설비별 날짜A / 날짜B 의 최신 진척률 계산
+  // ── Top 10 변화 섹션 (기간 동안 진척률 변화) ─────────────────────
+  {
+    // 설비별 기간 진입 직전 / 종료 시점의 누적 진척률 비교
     const allEquips = [...new Set(recs.filter(r => isValidEquip(r.e)).map(r => r.e))];
     const equipChanges = [];
 
     for (const eq of allEquips) {
-      // 날짜A: 해당 날짜에 기록된 공종별 진척률의 평균
+      // 해당 날짜까지의 누적 max(공종별)의 평균
       const calcAvg = (date) => {
-        const rs = recs.filter(r => r.e === eq && r.d === date && typeof r.p === 'number' && normalizeCategory(r.c));
+        const rs = recs.filter(r => r.e === eq && r.d <= date && typeof r.p === 'number' && normalizeCategory(r.c) && catOK(r));
         if (!rs.length) return null;
         // 공종별 max 진척률의 평균
         const byCat = new Map();
@@ -856,30 +927,37 @@ function renderDailyCompare(recs, dateA, dateB) {
         return tot / byCat.size;
       };
 
-      const pA = calcAvg(useDateA);
+      let pA = calcAvg(baseDate);
       const pB = calcAvg(useDateB);
-      if (pA == null || pB == null) continue;
-
+      if (pB == null) continue;
+      if (pA == null) pA = 0;            // 기간 중 신규 착수 → 0 기준
       const diff = pB - pA;
       if (Math.abs(diff) < 0.001) continue; // 변화 없음 제외
 
-      // 해당 설비의 업체 (날짜B 기준, 없으면 날짜A)
-      const vRec = recs.find(r => r.e === eq && (r.d === useDateB || r.d === useDateA));
-      equipChanges.push({ eq, pA, pB, diff, v: vRec?.v || null });
+      // 해당 설비의 업체 (종료 시점까지 기록 중 하나)
+      const vRec = recs.find(r => r.e === eq && r.d <= useDateB);
+      // 기간 내 그 설비에 투입된 총 공수(M/D)
+      let md = 0;
+      for (const r of recs) {
+        if (r.e !== eq || r.d < pStart || r.d > pEnd) continue;
+        if (!catOK(r)) continue;
+        md += (r.m || 0);
+      }
+      equipChanges.push({ eq, pA, pB, diff, v: vRec?.v || null, md });
     }
 
     if (equipChanges.length > 0) {
-      const top10Up   = equipChanges.filter(x => x.diff > 0).sort((a,b) => b.diff - a.diff).slice(0, 10);
-      const top10Down = equipChanges.filter(x => x.diff < 0).sort((a,b) => a.diff - b.diff).slice(0, 10);
+      const top10Up    = equipChanges.filter(x => x.diff > 0).sort((a,b) => b.diff - a.diff).slice(0, 10);
+      const top10Least = equipChanges.filter(x => x.diff > 0 && x.pB < 0.90).sort((a,b) => a.diff - b.diff).slice(0, 10);
 
       const VC2 = {'주민':'#2E7D32','동영':'#fd7e14','새로':'#4e8ef7','제이엠':'#6f42c1'};
 
-      const rankRow = (item, rank, isUp) => {
+      const rankRow = (item, rank, mode) => {
         const pct   = Math.round(Math.abs(item.diff) * 100);
         const pAp   = Math.round(item.pA * 100);
         const pBp   = Math.round(item.pB * 100);
-        const color = isUp ? '#2E7D32' : '#dc3545';
-        const sign  = isUp ? '▲' : '▼';
+        const sign  = item.diff > 0 ? '▲' : item.diff < 0 ? '▼' : '─';
+        const color = mode === 'least' ? '#b26a00' : (item.diff > 0 ? '#2E7D32' : '#dc3545');
         const dot   = item.v
           ? '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:'+(VC2[item.v]||'#aaa')+';margin-right:4px;vertical-align:middle;"></span>'
           : '';
@@ -898,7 +976,8 @@ function renderDailyCompare(recs, dateA, dateB) {
           + '</tr>';
       };
 
-      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:16px;">';
+      h += '<div style="font-size:12px;font-weight:600;color:#444;margin-top:18px;margin-bottom:4px;">설비별 진척 변화 (기간)</div>';
+      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:6px;">';
 
       // 상승 Top 10
       h += '<div>';
@@ -908,35 +987,243 @@ function renderDailyCompare(recs, dateA, dateB) {
         h += '<thead><tr style="background:#f8f9fa;">'
            + '<th style="padding:5px 10px;font-size:10px;color:#aaa;font-weight:400;width:28px;">#</th>'
            + '<th style="padding:5px 10px;font-size:10px;color:#666;font-weight:500;">설비</th>'
-           + '<th style="padding:5px 10px;font-size:10px;color:#666;font-weight:500;">전일→금일</th>'
+           + '<th style="padding:5px 10px;font-size:10px;color:#666;font-weight:500;">시작→종료</th>'
            + '<th style="padding:5px 10px;font-size:10px;color:#666;font-weight:500;">변화량</th>'
            + '</tr></thead><tbody>';
-        top10Up.forEach((item, i) => { h += rankRow(item, i+1, true); });
+        top10Up.forEach((item, i) => { h += rankRow(item, i+1, 'up'); });
         h += '</tbody></table></div>';
       } else {
         h += '<div style="color:#aaa;font-size:12px;padding:12px 10px;">상승한 설비 없음</div>';
       }
       h += '</div>';
 
-      // 하락 Top 10
+      // 가장 적게 오른 Top 10 (완료 90%↑ 제외)
       h += '<div>';
-      h += '<div style="font-size:12px;font-weight:600;color:#dc3545;margin-bottom:6px;padding:6px 10px;background:#fff5f5;border-radius:6px;">▼ 하락 Top ' + top10Down.length + '</div>';
-      if (top10Down.length) {
+      h += '<div style="font-size:12px;font-weight:600;color:#b26a00;margin-bottom:6px;padding:6px 10px;background:#fff8ec;border-radius:6px;">▼ 가장 적게 오른 Top ' + top10Least.length + ' <span style="font-weight:400;font-size:10px;color:#b58a4a;">(90%↑ 완료 제외)</span></div>';
+      if (top10Least.length) {
         h += '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;">';
         h += '<thead><tr style="background:#f8f9fa;">'
            + '<th style="padding:5px 10px;font-size:10px;color:#aaa;font-weight:400;width:28px;">#</th>'
            + '<th style="padding:5px 10px;font-size:10px;color:#666;font-weight:500;">설비</th>'
-           + '<th style="padding:5px 10px;font-size:10px;color:#666;font-weight:500;">전일→금일</th>'
+           + '<th style="padding:5px 10px;font-size:10px;color:#666;font-weight:500;">시작→종료</th>'
            + '<th style="padding:5px 10px;font-size:10px;color:#666;font-weight:500;">변화량</th>'
            + '</tr></thead><tbody>';
-        top10Down.forEach((item, i) => { h += rankRow(item, i+1, false); });
+        top10Least.forEach((item, i) => { h += rankRow(item, i+1, 'least'); });
         h += '</tbody></table></div>';
       } else {
-        h += '<div style="color:#aaa;font-size:12px;padding:12px 10px;">하락한 설비 없음</div>';
+        h += '<div style="color:#aaa;font-size:12px;padding:12px 10px;">대상 없음</div>';
       }
       h += '</div>';
 
       h += '</div>'; // grid end
+
+      // 설비 공수 대비 효율 Top (진척률변화 ÷ 설비 투입공수, %p/공수 · 공수 0.5↑)
+      const effOfEq = (x) => (x.md >= 0.5) ? (x.diff * 100) / x.md : null;
+      const effEq = equipChanges.filter(x => x.diff > 0 && effOfEq(x) != null)
+        .sort((a, b) => effOfEq(b) - effOfEq(a)).slice(0, 10);
+      h += '<div style="margin-top:10px;"><div style="font-size:12px;font-weight:600;color:#1f6f8b;margin-bottom:6px;padding:6px 10px;background:#eef7fb;border-radius:6px;">⚡ 설비 공수 대비 효율 Top ' + effEq.length + ' <span style="font-weight:400;font-size:10px;color:#6a98a8;">(%p/공수 · 공수 0.5↑만)</span></div>';
+      if (effEq.length) {
+        h += '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;">';
+        h += '<thead><tr style="background:#f8f9fa;">'
+           + '<th style="padding:5px 10px;font-size:10px;color:#aaa;font-weight:400;width:28px;">#</th>'
+           + '<th style="padding:5px 10px;font-size:10px;color:#666;font-weight:500;text-align:left;">설비</th>'
+           + '<th style="padding:5px 10px;font-size:10px;color:#666;font-weight:500;text-align:left;">변화</th>'
+           + '<th style="padding:5px 10px;font-size:10px;color:#666;font-weight:500;text-align:right;">공수</th>'
+           + '<th style="padding:5px 10px;font-size:10px;color:#666;font-weight:500;text-align:right;">효율</th>'
+           + '</tr></thead><tbody>';
+        effEq.forEach((item, i) => {
+          const eff = effOfEq(item);
+          const effColor = eff >= 10 ? '#2E7D32' : eff >= 4 ? '#b26a00' : '#888';
+          const edot = item.v ? '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:'+(VC2[item.v]||'#aaa')+';margin-right:4px;vertical-align:middle;"></span>' : '';
+          h += '<tr style="border-bottom:1px solid #f5f5f5;">'
+            + '<td style="padding:6px 10px;text-align:center;color:#aaa;font-size:11px;width:28px;">' + (i+1) + '</td>'
+            + '<td style="padding:6px 10px;font-weight:500;font-size:12px;white-space:nowrap;">' + edot + item.eq + '</td>'
+            + '<td style="padding:6px 10px;font-size:11px;color:#2E7D32;font-weight:600;white-space:nowrap;">▲ ' + Math.round(item.diff*100) + '%</td>'
+            + '<td style="padding:6px 10px;font-size:11px;color:#888;text-align:right;white-space:nowrap;">' + item.md.toFixed(1) + '</td>'
+            + '<td style="padding:6px 10px;text-align:right;font-size:12px;font-weight:700;color:'+effColor+';white-space:nowrap;">' + eff.toFixed(1) + '</td>'
+            + '</tr>';
+        });
+        h += '</tbody></table></div>';
+      } else {
+        h += '<div style="color:#aaa;font-size:12px;padding:12px 10px;">대상 없음 (공수 0.5↑ 기록 없음)</div>';
+      }
+      h += '</div>';
+    }
+  }
+
+  // ── 기술인·공종·설비별 진척 변화 (기간) · 협력사별 ────────────────
+  {
+    const VC3 = {'주민':'#2E7D32','동영':'#fd7e14','새로':'#4e8ef7','제이엠':'#6f42c1'};
+    const catColor = (c) => (typeof CATEGORY_COLOR !== 'undefined' && CATEGORY_COLOR[c]) || '#888';
+
+    // 층(작업위치) 필터: 'ALL' 또는 FSF/CSF/FAB/천정/외곽
+    const dcFloor = (typeof window !== 'undefined' && window._dcFloor) ? window._dcFloor : 'ALL';
+    const floorOK = (r) => dcFloor === 'ALL' || r.floor === dcFloor;
+
+    // 특정 기술인이 특정 설비·공종에 대해 보고한 누적 진척률 (해당일까지 max)
+    const cellMax = (w, e, c, date) => {
+      let mx = null;
+      for (const r of recs) {
+        if (r.w !== w || r.e !== e || r.d > date) continue;
+        if (typeof r.p !== 'number') continue;
+        if (normalizeCategory(r.c) !== c || !catOK(r) || !floorOK(r)) continue;
+        if (mx == null || r.p > mx) mx = r.p;
+      }
+      return mx == null ? null : Math.min(1, mx);
+    };
+
+    // 기간 내 보고가 있는 (기술인, 공종, 설비) 추출 + 기간 첫 보고일 기록
+    const keys = new Map(); // "w|c|e" → {w,c,e,v,first}
+    for (const r of recs) {
+      if (!r.w || !isValidEquip(r.e)) continue;
+      if (typeof r.p !== 'number') continue;
+      if (r.d < pStart || r.d > pEnd) continue;          // 기간 내 활동
+      const c = normalizeCategory(r.c);
+      if (!c || !catOK(r) || !floorOK(r)) continue;
+      const k = r.w + '|' + c + '|' + r.e;
+      if (!keys.has(k)) keys.set(k, { w: r.w, c, e: r.e, v: r.v || '기타', first: r.d });
+      else if (r.d < keys.get(k).first) keys.get(k).first = r.d;
+    }
+
+    // 기간 내 해당 기술인이 그 공종·설비에 투입한 공수(M/D) 합계
+    const periodMD = (w, e, c) => {
+      let s = 0;
+      for (const r of recs) {
+        if (r.w !== w || r.e !== e || r.d < pStart || r.d > pEnd) continue;
+        if (normalizeCategory(r.c) !== c || !catOK(r) || !floorOK(r)) continue;
+        s += (r.m || 0);
+      }
+      return s;
+    };
+
+    const changes = [];
+    for (const { w, c, e, v, first } of keys.values()) {
+      const pBefore = cellMax(w, e, c, baseDate);   // 기간 직전 누적
+      const pB = cellMax(w, e, c, pEnd);
+      if (pB == null) continue;
+      let pA;
+      if (pBefore != null) {
+        pA = pBefore;                                // 직전 이력 있음 → 직전 누적 기준
+      } else {
+        pA = cellMax(w, e, c, first);                // 신규 착수 → 기간 첫 보고값 기준(첫 보고분 제외)
+      }
+      changes.push({ w, c, e, v, pA, pB, diff: pB - pA, md: periodMD(w, e, c), isNew: pBefore == null });
+    }
+
+    if (changes.length > 0) {
+      const row = (item, rank) => {
+        const pct = Math.round(Math.abs(item.diff) * 100);
+        const pAp = Math.round(item.pA * 100);
+        const pBp = Math.round(item.pB * 100);
+        const sign = item.diff > 0 ? '▲' : item.diff < 0 ? '▼' : '─';
+        const color = item.diff > 0 ? '#2E7D32' : item.diff < 0 ? '#dc3545' : '#999';
+        const catChip = '<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:8px;background:'+catColor(item.c)+'22;color:'+catColor(item.c)+';font-weight:600;white-space:nowrap;">'+item.c+'</span>';
+        const mdTxt = ' <span style="font-size:10px;color:#888;font-weight:400;white-space:nowrap;">공수 '+(item.md||0).toFixed(1)+'</span>';
+        const newTag = item.isNew ? ' <span style="font-size:9px;color:#4e8ef7;border:1px solid #cfe0fb;border-radius:6px;padding:0 4px;vertical-align:middle;">신규</span>' : '';
+        return '<tr style="border-bottom:1px solid #f5f5f5;">'
+          + '<td style="padding:6px 8px;text-align:center;color:#aaa;font-size:11px;width:24px;">' + rank + '</td>'
+          + '<td style="padding:6px 8px;font-weight:500;font-size:12px;white-space:nowrap;">' + item.w + mdTxt + '</td>'
+          + '<td style="padding:6px 8px;white-space:nowrap;">' + catChip + '</td>'
+          + '<td style="padding:6px 8px;font-size:11px;color:#555;white-space:nowrap;">' + item.e + '</td>'
+          + '<td style="padding:6px 8px;font-size:11px;color:#888;white-space:nowrap;">' + pAp + '% → ' + pBp + '%' + newTag + '</td>'
+          + '<td style="padding:6px 10px;text-align:right;font-size:12px;font-weight:600;color:'+color+';white-space:nowrap;">' + sign + ' ' + pct + '%</td>'
+          + '</tr>';
+      };
+      const table = (rows, emptyMsg) => {
+        if (!rows.length) return '<div style="color:#aaa;font-size:12px;padding:12px 10px;">'+emptyMsg+'</div>';
+        let t = '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;">'
+          + '<thead><tr style="background:#f8f9fa;">'
+          + '<th style="padding:5px 8px;font-size:10px;color:#aaa;font-weight:400;width:24px;">#</th>'
+          + '<th style="padding:5px 8px;font-size:10px;color:#666;font-weight:500;text-align:left;">기술인</th>'
+          + '<th style="padding:5px 8px;font-size:10px;color:#666;font-weight:500;text-align:left;">공종</th>'
+          + '<th style="padding:5px 8px;font-size:10px;color:#666;font-weight:500;text-align:left;">설비</th>'
+          + '<th style="padding:5px 8px;font-size:10px;color:#666;font-weight:500;text-align:left;">시작→종료</th>'
+          + '<th style="padding:5px 10px;font-size:10px;color:#666;font-weight:500;text-align:right;">변화</th>'
+          + '</tr></thead><tbody>';
+        rows.forEach((it, i) => { t += row(it, i + 1); });
+        return t + '</tbody></table></div>';
+      };
+
+      // 효율 지수 = 진척률 변화(%p) ÷ 공수  (공수 0.5 미만은 제외)
+      const effOf = (it) => (it.md >= 0.5) ? (it.diff * 100) / it.md : null;
+      const effRow = (item, rank) => {
+        const eff = effOf(item);
+        const pct = Math.round(item.diff * 100);
+        const catChip = '<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:8px;background:'+catColor(item.c)+'22;color:'+catColor(item.c)+';font-weight:600;white-space:nowrap;">'+item.c+'</span>';
+        const effTxt = eff == null ? '<span style="color:#bbb;">—</span>' : eff.toFixed(1);
+        const effColor = eff == null ? '#bbb' : (eff >= 10 ? '#2E7D32' : eff >= 4 ? '#b26a00' : '#888');
+        return '<tr style="border-bottom:1px solid #f5f5f5;">'
+          + '<td style="padding:6px 8px;text-align:center;color:#aaa;font-size:11px;width:24px;">' + rank + '</td>'
+          + '<td style="padding:6px 8px;font-weight:500;font-size:12px;white-space:nowrap;">' + item.w + '</td>'
+          + '<td style="padding:6px 8px;white-space:nowrap;">' + catChip + '</td>'
+          + '<td style="padding:6px 8px;font-size:11px;color:#555;white-space:nowrap;">' + item.e + '</td>'
+          + '<td style="padding:6px 8px;font-size:11px;color:#2E7D32;font-weight:600;white-space:nowrap;">▲ ' + pct + '%</td>'
+          + '<td style="padding:6px 8px;font-size:11px;color:#888;text-align:right;white-space:nowrap;">' + (item.md||0).toFixed(1) + '</td>'
+          + '<td style="padding:6px 10px;text-align:right;font-size:12px;font-weight:700;color:'+effColor+';white-space:nowrap;">' + effTxt + '</td>'
+          + '</tr>';
+      };
+      const effTable = (rows, emptyMsg) => {
+        if (!rows.length) return '<div style="color:#aaa;font-size:12px;padding:12px 10px;">'+emptyMsg+'</div>';
+        let t = '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;">'
+          + '<thead><tr style="background:#f8f9fa;">'
+          + '<th style="padding:5px 8px;font-size:10px;color:#aaa;font-weight:400;width:24px;">#</th>'
+          + '<th style="padding:5px 8px;font-size:10px;color:#666;font-weight:500;text-align:left;">기술인</th>'
+          + '<th style="padding:5px 8px;font-size:10px;color:#666;font-weight:500;text-align:left;">공종</th>'
+          + '<th style="padding:5px 8px;font-size:10px;color:#666;font-weight:500;text-align:left;">설비</th>'
+          + '<th style="padding:5px 8px;font-size:10px;color:#666;font-weight:500;text-align:left;">변화</th>'
+          + '<th style="padding:5px 8px;font-size:10px;color:#666;font-weight:500;text-align:right;">공수</th>'
+          + '<th style="padding:5px 10px;font-size:10px;color:#666;font-weight:500;text-align:right;">효율</th>'
+          + '</tr></thead><tbody>';
+        rows.forEach((it, i) => { t += effRow(it, i + 1); });
+        return t + '</tbody></table></div>';
+      };
+
+      // 협력사 순서: 표준 4사 먼저, 그 외(기타) 뒤에
+      const present = [...new Set(changes.map(x => x.v))];
+      const vlist = VENDORS.filter(v => present.includes(v)).concat(present.filter(v => !VENDORS.includes(v)));
+
+      h += '<div style="font-size:13px;font-weight:700;color:#333;margin-top:24px;margin-bottom:6px;">기술인·공종·설비별 진척 변화 (기간) · 협력사별</div>';
+
+      // 작업위치(층) 선택 탭
+      const floorsExist = new Set();
+      for (const r of recs) {
+        if (r.d < pStart || r.d > pEnd) continue;
+        if (!r.w || !isValidEquip(r.e) || typeof r.p !== 'number') continue;
+        if (!normalizeCategory(r.c) || !catOK(r)) continue;
+        if (r.floor) floorsExist.add(r.floor);
+      }
+      const floorTabs = FLOOR_ORDER.filter(f => f === 'ALL' || floorsExist.has(f));
+      if (floorTabs.length > 1) {
+        h += '<div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin:0 0 10px;">';
+        h += '<span style="font-size:11px;color:#888;margin-right:2px;">작업위치</span>';
+        for (const f of floorTabs) {
+          const on = dcFloor === f;
+          h += '<button onclick="dcSetFloor(\''+f+'\')" style="padding:2px 10px;font-size:11px;border-radius:3px;cursor:pointer;border:1px solid '
+            + (on ? '#1f6f8b' : '#d1d5db') + ';background:' + (on ? '#1f6f8b' : '#fff') + ';color:' + (on ? '#fff' : '#555') + ';">'
+            + (f === 'ALL' ? '전체' : f) + '</button>';
+        }
+        h += '</div>';
+      }
+
+      for (const v of vlist) {
+        const vc = changes.filter(x => x.v === v);
+        if (!vc.length) continue;
+        const mostUp  = [...vc].sort((a, b) => b.diff - a.diff).slice(0, 10);
+        const upWorkers = new Set(mostUp.map(x => x.w));   // 많이 오른 리스트의 기술인
+        const leastUp = vc.filter(x => x.pB < 0.90 && !upWorkers.has(x.w))   // 많이 오른 기술인 제외
+          .sort((a, b) => a.diff - b.diff).slice(0, 10);
+        const vdot = '<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:'+(VC3[v]||'#aaa')+';margin-right:6px;vertical-align:middle;"></span>';
+
+        h += '<div style="margin-top:14px;padding:6px 10px;background:'+(VC3[v]||'#888')+'14;border-left:3px solid '+(VC3[v]||'#888')+';border-radius:4px;font-size:12px;font-weight:700;color:#333;">'+vdot+v+'</div>';
+        h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:6px;">';
+        h += '<div><div style="font-size:11px;font-weight:600;color:#2E7D32;margin-bottom:6px;padding:5px 10px;background:#f0faf3;border-radius:6px;">▲ 가장 많이 오른 Top ' + mostUp.length + '</div>' + table(mostUp, '상승 없음') + '</div>';
+        h += '<div><div style="font-size:11px;font-weight:600;color:#b26a00;margin-bottom:6px;padding:5px 10px;background:#fff8ec;border-radius:6px;">▼ 가장 안 오른 Top ' + leastUp.length + ' <span style="font-weight:400;font-size:10px;color:#b58a4a;">(90%↑ 완료 제외)</span></div>' + table(leastUp, '대상 없음') + '</div>';
+        h += '</div>';
+
+        // 공수 대비 효율 Top (진척률변화 ÷ 공수, %p/공수 · 공수 0.5↑)
+        const effList = vc.filter(x => effOf(x) != null).sort((a, b) => effOf(b) - effOf(a)).slice(0, 10);
+        h += '<div style="margin-top:8px;"><div style="font-size:11px;font-weight:600;color:#1f6f8b;margin-bottom:6px;padding:5px 10px;background:#eef7fb;border-radius:6px;">⚡ 공수 대비 효율 Top ' + effList.length + ' <span style="font-weight:400;font-size:10px;color:#6a98a8;">(%p/공수 · 공수 0.5↑만)</span></div>' + effTable(effList, '대상 없음 (공수 0.5↑ 기록 없음)') + '</div>';
+      }
     }
   }
 
@@ -1066,7 +1353,7 @@ document.addEventListener('DOMContentLoaded', function() {
   const _dcB = document.getElementById('dcDateB');
   const _dcA = document.getElementById('dcDateA');
   if (_dcB) _dcB.value = cstToday();
-  if (_dcA) _dcA.value = cstYesterday();
+  if (_dcA) _dcA.value = cstToday();
 
   // 조회 버튼
   const notesSearchEl = document.getElementById('notesSearch');
@@ -1085,6 +1372,34 @@ document.addEventListener('DOMContentLoaded', function() {
       document.getElementById('dcApply').click();
     });
   });
+  // 공정 변경 시 자동 조회
+  const dcCatEl = document.getElementById('dcCat');
+  if (dcCatEl) dcCatEl.addEventListener('change', function() {
+    document.getElementById('dcApply').click();
+  });
+  // 기간 프리셋 (오늘 / 이번주 / 이번달)
+  function dcSetPeriod(start, end) {
+    const a = document.getElementById('dcDateA');
+    const b = document.getElementById('dcDateB');
+    if (a) a.value = start;
+    if (b) b.value = end;
+    document.getElementById('dcApply').click();
+  }
+  document.querySelectorAll('.dc-preset').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      const t = cstToday();
+      const p = btn.getAttribute('data-preset');
+      if (p === 'today')      dcSetPeriod(t, t);
+      else if (p === 'week')  dcSetPeriod(isoWeekStart(t), t);
+      else if (p === 'month') dcSetPeriod(t.slice(0,8) + '01', t);
+      // 활성 표시
+      document.querySelectorAll('.dc-preset').forEach(function(b2){
+        const on = b2 === btn;
+        b2.style.background = on ? '#14B446' : '#fff';
+        b2.style.color = on ? '#fff' : '#555';
+      });
+    });
+  });
 
   document.getElementById('excelInput').addEventListener('change', function(e) {
     const files = Array.from(e.target.files||[]);
@@ -1096,30 +1411,39 @@ document.addEventListener('DOMContentLoaded', function() {
     const stat = document.getElementById('importStatus');
     stat.textContent = '처리 중...';
     let done=0;
+    let failed=0;
     const stored = lsLoad() || [];
     let totalAdded = 0;
+    let totalUpdated = 0;
+    function finish() {
+      done++;
+      if (done < files.length) return;
+      lsSave(stored);
+      const failMsg = failed ? (' · ' + failed + '건 실패') : '';
+      const updMsg = totalUpdated ? (' · ' + totalUpdated + '건 갱신') : '';
+      stat.textContent = '✓ ' + totalAdded + '건 추가' + updMsg + ' (총 '+stored.length+'건)' + failMsg + ' — 새로고침 중...';
+      setTimeout(function(){ location.reload(); }, 900);
+    }
     files.forEach(function(file) {
       const reader = new FileReader();
       reader.onerror = function() {
         alert('파일 읽기 오류: ' + file.name);
-        done++;
+        failed++;
+        finish();
       };
       reader.onload = function(ev) {
         try {
           const wb = XLSX.read(new Uint8Array(ev.target.result), {type:'array'});
           const incoming = xlsxToRecords(wb);
-          const added = mergeInto(stored, incoming);
-          totalAdded += added;
+          const res = mergeInto(stored, incoming);
+          totalAdded += res.added;
+          totalUpdated += res.updated;
         } catch(err) {
           alert('파싱 오류: ' + file.name + '\n' + err.message);
           console.error(err);
+          failed++;
         }
-        done++;
-        if (done === files.length) {
-          lsSave(stored);
-          stat.textContent = '✓ ' + totalAdded + '건 추가 (총 '+stored.length+'건) — 새로고침 중...';
-          setTimeout(function(){ location.reload(); }, 900);
-        }
+        finish();
       };
       reader.readAsArrayBuffer(file);
     });
@@ -1372,16 +1696,29 @@ function isoWeek(dateStr) {
   const wk = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
   return 'W' + String(wk).padStart(2, '0');
 }
+// 날짜 문자열(yyyy-mm-dd)에 n일 더하기
+function addDaysStr(dateStr, n) {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  if (isNaN(d)) return dateStr;
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+// ISO 주(월~일)의 시작(월)·끝(일) 날짜
+function isoWeekStart(dateStr) {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  if (isNaN(d)) return dateStr;
+  const off = (d.getUTCDay() + 6) % 7; // Mon=0 … Sun=6
+  d.setUTCDate(d.getUTCDate() - off);
+  return d.toISOString().slice(0, 10);
+}
+function isoWeekEnd(dateStr) { return addDaysStr(isoWeekStart(dateStr), 6); }
 function clamp01(v) { return Math.max(0, Math.min(1, v)); }
 
 function isValidEquip(e) {
   if (!e || typeof e !== 'string') return false;
   const s = e.trim();
-  if (s === '') return false;
-  if (/[\uAC00-\uD7A3\u3131-\u318E]/.test(s)) return false;
-  if (!/[a-zA-Z]/.test(s)) return false;
-  if (!/[0-9]/.test(s)) return false;
-  return true;
+  // 설비명: 알파벳 6글자 + 숫자 2자리 (예: ABCDEF12) 만 자료로 사용
+  return /^[A-Za-z]{6}[0-9]{2}$/.test(s);
 }
 
 // 설비별 5대 공종(c)별 max(progress) Map<eq, Map<c, maxP>>
@@ -2560,7 +2897,36 @@ function renderNotes(data) {
 }
 
 // ── 히트맵 상태 ──────────────────────────────────────────────────────
-const hmState = { mode: 'week', sort: 'md' };
+const hmState = { mode: 'week', sort: 'md', floor: 'ALL' };
+
+// 히트맵 층 필터 탭 (전체 / FSF / CSF / FAB / 천정 …)
+function buildHmFloorTabs(data) {
+  const wrap = document.getElementById('hmFloorWrap');
+  if (!wrap) return;
+  const exists = new Set(data.map(r => r.floor).filter(Boolean));
+  const tabs = FLOOR_ORDER.filter(f => f === 'ALL' || exists.has(f));
+  // 선택된 층이 더 이상 데이터에 없으면 전체로 복귀
+  if (hmState.floor !== 'ALL' && !exists.has(hmState.floor)) hmState.floor = 'ALL';
+  wrap.innerHTML = '';
+  if (tabs.length <= 1) return;  // 층 구분이 없으면 탭 숨김
+  const lbl = document.createElement('span');
+  lbl.textContent = '작업위치';
+  lbl.style.cssText = 'font-size:11px;color:#888;margin-right:2px;';
+  wrap.appendChild(lbl);
+  tabs.forEach(function(f) {
+    const btn = document.createElement('button');
+    const active = hmState.floor === f;
+    btn.textContent = f === 'ALL' ? '전체' : f;
+    btn.style.cssText = 'padding:2px 9px;font-size:11px;border-radius:3px;cursor:pointer;border:1px solid '
+      + (active ? '#14B446' : '#d1d5db') + ';background:' + (active ? '#14B446' : '#fff')
+      + ';color:' + (active ? '#fff' : '#555') + ';transition:all .1s;';
+    btn.addEventListener('click', function() {
+      hmState.floor = f;
+      renderHeatmap(applyFilter());
+    });
+    wrap.appendChild(btn);
+  });
+}
 
 function setHmMode(m) {
   hmState.mode = m;
@@ -2589,6 +2955,10 @@ function setHmSort(s) {
 function renderHeatmap(data) {
   const wrap = document.getElementById('heatmap');
   wrap.innerHTML = '';
+
+  // 층 탭은 (층 필터 적용 전) 전체 데이터 기준으로 구성
+  buildHmFloorTabs(data);
+  if (hmState.floor !== 'ALL') data = data.filter(r => r.floor === hmState.floor);
 
   const valid = data.filter(r => isValidEquip(r.e));
   if (valid.length === 0) {
@@ -2739,7 +3109,8 @@ function renderHeatmap(data) {
         cell.classList.add('clickable');
         (function(e2, c2, cl2) {
           cell.addEventListener('click', function() {
-            openHmModal(e2, c2, cl2, applyFilter());
+            const fd = applyFilter();
+            openHmModal(e2, c2, cl2, hmState.floor === 'ALL' ? fd : fd.filter(r => r.floor === hmState.floor));
           });
         })(eq, col, col);
       }
@@ -2818,9 +3189,11 @@ function openHmModal(eq, col, colLabel, allData) {
      + '</tr></thead><tbody>';
   for (const r of sorted) {
     const dot = '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:'+(VC[r.v]||'#aaa')+';margin-right:4px;vertical-align:middle;"></span>';
-    const shiftBadge = r.m === 1.25
-      ? '<span style="font-size:10px;background:#fff3cd;color:#856404;padding:1px 4px;border-radius:3px;margin-left:3px;">+2hr</span>'
-      : r.m === 0.5
+    const shiftBadge = r.sh === '야간'
+      ? '<span style="font-size:10px;background:#e7eefc;color:#1f4e8b;padding:1px 4px;border-radius:3px;margin-left:3px;">야간</span>'
+      : r.sh === '연장'
+      ? '<span style="font-size:10px;background:#fff3cd;color:#856404;padding:1px 4px;border-radius:3px;margin-left:3px;">연장</span>'
+      : r.sh === '반차'
       ? '<span style="font-size:10px;background:#f3e8ff;color:#6f42c1;padding:1px 4px;border-radius:3px;margin-left:3px;">반차</span>'
       : '';
     const loc = [r.floor, r.col].filter(Boolean).join(' ');
@@ -3686,7 +4059,7 @@ function render() {
   }
 }
 
-renderDailyCompare(_stored, cstYesterday(), cstToday());
+renderDailyCompare(_stored, cstToday(), cstToday());
 document.getElementById('exportedAt').textContent = '데이터 기준: ' + (RAW.meta.exported_at || '-');
 document.getElementById('recordTotal').textContent = RAW.records.length;
 setupFilters();
