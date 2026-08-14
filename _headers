@@ -1,0 +1,32 @@
+# ============================================================================
+#  BBTECH T-PJT Dashboard — Cloudflare Pages 응답 헤더 설정
+#  파일 위치: 저장소 최상위 (index.html 과 같은 폴더)
+#  Build: 2026-08-14 / Rev 1.0.0
+#
+#  주의: 이 파일은 확장자가 없습니다. 이름은 정확히  _headers  여야 합니다.
+# ============================================================================
+
+# 모든 경로 공통 보안 헤더
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+
+# API 중계기 — 절대 캐시하지 않음
+/api/*
+  Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+  Pragma: no-cache
+  Expires: 0
+
+# 대시보드 본체 — 새로고침할 때마다 최신 코드를 받도록 캐시 차단
+/
+  Cache-Control: no-store, must-revalidate
+
+/index.html
+  Cache-Control: no-store, must-revalidate
+
+# 장애 대비 저장본(fallback) — 오래된 사본이 남지 않도록 캐시 차단
+/sheet-data.csv
+  Cache-Control: no-store, must-revalidate
+
+/sheet-data.js
+  Cache-Control: no-store, must-revalidate
