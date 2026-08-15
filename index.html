@@ -14,7 +14,7 @@ if (location.protocol === 'file:') {
 }
 </script>
 <script>
-window.BBTECH_BUILD = '2026-08-15.1';
+window.BBTECH_BUILD = '2026-08-15.3';
 if (typeof window.Chart === 'undefined') {
   window.Chart = class ChartFallback {
     constructor(ctx, config) {
@@ -2233,6 +2233,10 @@ function effSectionHtml() {
 // ── 수정 이력 (최신순) ──────────────────────────────────────────────
 const REVISIONS = [
   { date: '2026-08-15', items: [
+    '기술인·공종·설비별 진척 변화 표에 총변화 %p(담당 설비 전체 합계)와 공수당 변화 열을 추가',
+    '동일 설비를 여러 기술인이 함께 작업한 경우 진척이 인원수만큼 중복 계상되던 문제를 수정 — 설치공수 비율로 배분하고 \'공동 N\' 배지 표시',
+    '순위 정렬 기준을 설비 1대당 평균 변화에서 총변화량으로 변경 — 설비 대수가 많은 기술인의 산출량이 정상 반영됨',
+    '상승/정체 분류 기준은 기존 평균 5%p를 그대로 유지',
     'Cloudflare Pages Functions(/api/sheet)로 Google 원본 CSV를 실시간 중계하도록 전환',
     'GitHub Pages 전용 sheet-data.csv 강제 사용 분기를 제거하고 원본 우선·저장본 폴백 구조로 변경',
     '페이지 열람·새로고침·동기화 버튼 시 원본을 즉시 요청하고 열려 있는 동안 1분마다 자동 동기화',
@@ -3208,6 +3212,35 @@ function renderDailyCompare(recs, dateA, dateB) {
       changes.push({ w, c, e, ph, v, pA, pB, diff: pB - pA, md: periodMD(w, e, c, ph), isNew: pBefore == null, dates: [...dates].sort() });
     }
 
+    // [2026-08-15] 동일 설비·공종·구분을 여러 기술인이 함께 작업한 경우
+    // 설비 한 대의 진척이 인원수만큼 중복 계상되지 않도록 설치공수 비율로 배분한다.
+    // (기존 '배분진척' 규칙과 동일한 방식 — 평균 변화와 상승/정체 분류는 원래 값을 유지)
+    {
+      const cellGroups = new Map();   // "공종|설비|구분" → changes 항목들
+      for (const x of changes) {
+        const ck = x.c + '|' + x.e + '|' + (x.ph || '');
+        if (!cellGroups.has(ck)) cellGroups.set(ck, []);
+        cellGroups.get(ck).push(x);
+      }
+      for (const grp of cellGroups.values()) {
+        if (grp.length === 1) {
+          grp[0].diffAdj = grp[0].diff;
+          grp[0].coWorkers = 0;
+          continue;
+        }
+        // 설비 한 대의 실제 진척 변화 = 가장 낮은 시작값 → 가장 높은 종료값
+        const cellPA = Math.min(...grp.map(g => g.pA));
+        const cellPB = Math.max(...grp.map(g => g.pB));
+        const cellDiff = cellPB - cellPA;
+        const sumMd = grp.reduce((s, g) => s + (g.md || 0), 0);
+        for (const g of grp) {
+          const share = sumMd > 0 ? (g.md || 0) / sumMd : 1 / grp.length;
+          g.diffAdj = cellDiff * share;
+          g.coWorkers = grp.length - 1;
+        }
+      }
+    }
+
     if (changes.length > 0 || workforceVendors.size > 0) {
       // 이름 클릭 모달: 협력사+기술인별 동시 작업 설비 목록
       _workerModalData = [];
@@ -3236,13 +3269,25 @@ function renderDailyCompare(recs, dateA, dateB) {
         const nameCell = (item._wid != null)
           ? '<span onclick="openWorkerModal('+item._wid+')" title="동시 작업 설비 보기" style="cursor:pointer;color:#1f6f8b;text-decoration:underline;text-underline-offset:2px;">'+item.w+'</span>'
           : item.w;
+        // [2026-08-15] 총변화량(공동작업 배분 반영)과 공수당 변화 표시
+        const totPp = Math.round((item.sumAdj != null ? item.sumAdj : item.sumDiff || 0) * 100);
+        const totSign = totPp > 0 ? '▲' : totPp < 0 ? '▼' : '─';
+        const totColor = totPp > 0 ? '#2E7D32' : totPp < 0 ? '#dc3545' : '#999';
+        const coTag = (item.coCells > 0)
+          ? ' <span style="font-size:9px;color:#7a5fa6;border:1px solid #d8cbe8;border-radius:6px;padding:0 4px;vertical-align:middle;" title="다른 기술인과 함께 작업한 설비가 있어 진척을 설치공수 비율로 배분했습니다 ('+item.coCells+'건)">공동 '+item.coCells+'</span>'
+          : '';
+        const effTxt = (item.eff == null)
+          ? '<span style="color:#ccc;">-</span>'
+          : '<span style="color:' + (item.eff > 0 ? '#2E7D32' : item.eff < 0 ? '#dc3545' : '#999') + ';">' + item.eff.toFixed(1) + '</span>';
         return '<tr style="border-bottom:1px solid #f5f5f5;">'
           + '<td style="padding:6px 8px;text-align:center;color:#aaa;font-size:11px;width:24px;">' + rank + '</td>'
-          + '<td style="padding:6px 8px;font-weight:500;font-size:12px;white-space:nowrap;">' + nameCell + mdTxt + otherTag + '</td>'
+          + '<td style="padding:6px 8px;font-weight:500;font-size:12px;white-space:nowrap;">' + nameCell + mdTxt + otherTag + coTag + '</td>'
           + '<td style="padding:6px 8px;white-space:nowrap;">' + catChips(item.cats) + '</td>'
           + '<td style="padding:6px 8px;font-size:11px;color:#555;white-space:nowrap;font-weight:600;">' + item.eqCount + '대</td>'
           + '<td style="padding:6px 8px;font-size:11px;color:#888;white-space:nowrap;">' + pAp + '% → ' + pBp + '%' + newTag + '</td>'
-          + '<td style="padding:6px 10px;text-align:right;font-size:12px;font-weight:600;color:'+color+';white-space:nowrap;">' + sign + ' ' + pct + '%</td>'
+          + '<td style="padding:6px 10px;text-align:right;font-size:13px;font-weight:700;color:'+totColor+';white-space:nowrap;">' + totSign + ' ' + Math.abs(totPp) + '</td>'
+          + '<td style="padding:6px 10px;text-align:right;font-size:12px;font-weight:600;white-space:nowrap;">' + effTxt + '</td>'
+          + '<td style="padding:6px 10px;text-align:right;font-size:11px;font-weight:500;color:'+color+';white-space:nowrap;opacity:.75;">' + sign + ' ' + pct + '%</td>'
           + '</tr>';
       };
       const table = (rows, emptyMsg) => {
@@ -3254,7 +3299,9 @@ function renderDailyCompare(recs, dateA, dateB) {
           + '<th style="padding:5px 8px;font-size:10px;color:#666;font-weight:500;text-align:left;">공종</th>'
           + '<th style="padding:5px 8px;font-size:10px;color:#666;font-weight:500;text-align:left;">설비</th>'
           + '<th style="padding:5px 8px;font-size:10px;color:#666;font-weight:500;text-align:left;">평균 시작→종료</th>'
-          + '<th style="padding:5px 10px;font-size:10px;color:#666;font-weight:500;text-align:right;">평균 변화</th>'
+          + '<th style="padding:5px 10px;font-size:10px;color:#333;font-weight:700;text-align:right;" title="담당 설비 전체의 진척 변화 합계(%p). 설비 대수가 반영된 실제 산출량입니다.">총변화 %p</th>'
+          + '<th style="padding:5px 10px;font-size:10px;color:#666;font-weight:600;text-align:right;" title="총변화 ÷ 설치공수. 투입 대비 산출로, 공수가 다른 기간·인원 비교에 사용합니다.">공수당</th>'
+          + '<th style="padding:5px 10px;font-size:10px;color:#999;font-weight:400;text-align:right;" title="설비 1대당 평균 변화. 상승/정체 분류 기준입니다.">평균</th>'
           + '</tr></thead><tbody>';
         rows.forEach((it, i) => { t += row(it, i + 1); });
         return t + '</tbody></table></div>';
@@ -3294,10 +3341,12 @@ function renderDailyCompare(recs, dateA, dateB) {
         // ── 기술인별 집계 (설비 대수 표기) ──
         const byW = new Map();
         for (const x of vcCells) {
-          if (!byW.has(x.w)) byW.set(x.w, { w:x.w, v:x.v, _wid:x._wid, eqSet:new Set(), cats:new Set(), sumDiff:0, sumMd:0, sumPA:0, sumPB:0, n:0, allNew:true });
+          if (!byW.has(x.w)) byW.set(x.w, { w:x.w, v:x.v, _wid:x._wid, eqSet:new Set(), cats:new Set(), sumDiff:0, sumAdj:0, coCells:0, sumMd:0, sumPA:0, sumPB:0, n:0, allNew:true });
           const o = byW.get(x.w);
           o.eqSet.add(x.e); o.cats.add(x.c);
           o.sumDiff += x.diff; o.sumMd += (x.md||0);
+          o.sumAdj += (x.diffAdj != null ? x.diffAdj : x.diff);
+          if (x.coWorkers > 0) o.coCells++;
           o.sumPA += x.pA; o.sumPB += x.pB; o.n++;
           if (!x.isNew) o.allNew = false;
           if (x._wid != null) o._wid = x._wid;
@@ -3305,23 +3354,31 @@ function renderDailyCompare(recs, dateA, dateB) {
         const vc = [...byW.values()].map(o => ({
           w:o.w, v:o.v, _wid:o._wid,
           eqCount:o.eqSet.size, cats:[...o.cats],
-          diff:o.sumDiff/o.n, sumDiff:o.sumDiff,
+          diff:o.sumDiff/o.n, sumDiff:o.sumDiff, sumAdj:o.sumAdj, coCells:o.coCells,
           pA:o.sumPA/o.n, pB:o.sumPB/o.n,
-          md:o.sumMd, eff:(o.sumMd>=0.5 ? o.sumDiff*100/o.sumMd : null),
+          md:o.sumMd, eff:(o.sumMd>=0.5 ? o.sumAdj*100/o.sumMd : null),
           isNew:o.allNew
         }));
 
-        const TH = 0.05;  // 정체/상승 기준선 5%p (기술인 평균 변화 기준)
-        const mostUp  = vc.filter(x => x.diff >= TH).sort((a, b) => b.diff - a.diff);
+        const TH = 0.05;  // 상승/정체 분류 기준선 5%p (기술인 평균 변화 기준)
+        // [2026-08-15] 분류는 평균 변화로 하되, 순위는 총변화량(설비 대수 반영) 기준으로 정렬
+        const mostUp  = vc.filter(x => x.diff >= TH).sort((a, b) => (b.sumAdj||0) - (a.sumAdj||0));
         const risenWorkers = new Set(mostUp.map(x => x.w));
-        const leastUp = vc.filter(x => x.diff < TH && x.pB < 0.90).sort((a, b) => a.diff - b.diff);
+        const leastUp = vc.filter(x => x.diff < TH && x.pB < 0.90).sort((a, b) => (a.sumAdj||0) - (b.sumAdj||0));
         leastUp.forEach(it => { it._otherUp = false; });   // 기술인 단위라 타설비 상승 불필요
         const vdot = '<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:'+(VC3[v]||'#aaa')+';margin-right:6px;vertical-align:middle;"></span>';
 
         h += '<div style="margin-top:14px;padding:6px 10px;background:'+(VC3[v]||'#888')+'14;border-left:3px solid '+(VC3[v]||'#888')+';border-radius:4px;font-size:12px;font-weight:700;color:#333;">'+vdot+v+'</div>';
         h += vendorWorkforceBlockHtml(workforceData, v);
         if (vcCells.length) {
-          h += '<div style="font-size:11px;font-weight:700;color:#555;margin:10px 0 6px;">기술인·공종·설비별 진척 변화</div>';
+          h += '<div style="font-size:11px;font-weight:700;color:#555;margin:10px 0 6px;">기술인·공종·설비별 진척 변화 <span style="font-weight:400;color:#888;">— 총변화량 순 정렬</span></div>';
+          h += '<div style="font-size:10px;color:#8a8a8a;line-height:1.6;margin:0 0 8px;padding:6px 10px;background:#fafbfc;border-radius:5px;">'
+            + '<b>총변화 %p</b> 담당 설비 전체의 진척 변화 합계 · 설비 대수 반영 · 공동작업 설비는 설치공수 비율로 배분 &nbsp;|&nbsp; '
+            + '<b>공수당</b> 총변화 ÷ 설치공수 · 투입 대비 산출 &nbsp;|&nbsp; '
+            + '<b>평균</b> 설비 1대당 평균 · 상승/정체 분류 기준<br>'
+            + '※ 90% 이상 마무리 구간은 남은 여유가 적어 총변화가 낮게 나올 수 있습니다. 시작 진척률을 함께 보세요.<br>'
+            + '※ <span style="color:#7a5fa6;font-weight:600;">공동 N</span> 표시는 다른 기술인과 함께 작업한 설비 수이며, 해당 설비의 진척은 중복 계상되지 않도록 배분됩니다.'
+            + '</div>';
           h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:12px;margin-top:6px;">';
           h += '<div><div style="font-size:11px;font-weight:600;color:#2E7D32;margin-bottom:6px;padding:5px 10px;background:#f0faf3;border-radius:6px;">▲ 진척 상승 (' + mostUp.length + '명) <span style="font-weight:400;font-size:10px;color:#7bb992;">(평균 ≥5%p)</span></div>' + table(mostUp, '상승 없음') + '</div>';
           h += '<div><div style="font-size:11px;font-weight:600;color:#b26a00;margin-bottom:6px;padding:5px 10px;background:#fff8ec;border-radius:6px;">▼ 진척 정체·소폭 (' + leastUp.length + '명) <span style="font-weight:400;font-size:10px;color:#b58a4a;">(평균 &lt;5%p · 90%↑ 제외)</span></div>' + table(leastUp, '대상 없음') + '</div>';
