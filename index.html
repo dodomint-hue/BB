@@ -14,7 +14,7 @@ if (location.protocol === 'file:') {
 }
 </script>
 <script>
-window.BBTECH_BUILD = '2026-08-15.3';
+window.BBTECH_BUILD = '2026-08-15.4';
 if (typeof window.Chart === 'undefined') {
   window.Chart = class ChartFallback {
     constructor(ctx, config) {
@@ -1739,7 +1739,7 @@ function computeEffData() {
       key, v:r.v || '기타', names:new Map(), email:r.email || '', dates:new Set(), measuredDates:new Set(),
       attendanceMd:0, installAllMd:0, measuredMd:0, weldingMd:0, externalMd:0, supportMd:0, otherMd:0,
       weldingPoints:0, wpSeen:new Set(), eqSet:new Set(), cats:new Set(), catMd:new Map(), catCredit:new Map(),
-      credit:0, creditEqSet:new Set()
+      credit:0, creditEqSet:new Set(), headroom:0, hrCells:new Set(), catHeadroom:new Map()
     });
     const o = workforceMap.get(key);
     const md = Math.max(0, Number(r.m) || 0);
@@ -1826,11 +1826,19 @@ function computeEffData() {
       if (isInitialReportGain) {
         initialReportedDiff += gain;
       } else if (activeMd > 0) {
+        // [2026-08-15] 잔여소화율용: 기술인이 그 셀에 처음 기여한 시점의 남은 여유를 셀당 1회만 누적
+        const hrKey = cell.e + '|' + cell.c + '|' + (cell.ph || '');
+        const headroomNow = Math.max(0, 1 - prev);
         for (const [wk, md] of active.entries()) {
           const credit = gain * md / activeMd;
           const w = workforceMap.get(wk);
           if (!w) continue;
           w.credit += credit; w.creditEqSet.add(cell.e); mapAdd(w.catCredit, cell.c, credit);
+          if (!w.hrCells.has(hrKey)) {
+            w.hrCells.add(hrKey);
+            w.headroom += headroomNow;
+            mapAdd(w.catHeadroom, cell.c, headroomNow);
+          }
           allocatedDiff += credit;
         }
       } else unallocatedDiff += gain;
@@ -1855,8 +1863,10 @@ function computeEffData() {
     const dominantShare = o.attendanceMd > 0 ? roleValues[0][1] / o.attendanceMd : 0;
     const sampleLow = o.measuredMd > 0 && (o.measuredMd < EFF_MIN_MD || o.measuredDates.size < EFF_MIN_DAYS);
     const eff = o.measuredMd > 0 ? o.credit * 100 / o.measuredMd : null;
+    // 잔여소화율 = 배분진척 ÷ 착수 시점에 남아 있던 여유
+    const absorb = o.headroom > 0.01 ? Math.min(1, o.credit / o.headroom) : null;
     return { ...o, w, workDays:o.dates.size, measuredDays:o.measuredDates.size, measuredShare, nonMeasuredMd,
-      dominant, dominantShare, sampleLow, eff, sumDiff:o.credit, sumMd:o.measuredMd, eqCount:o.eqSet.size };
+      dominant, dominantShare, sampleLow, eff, absorb, sumDiff:o.credit, sumMd:o.measuredMd, eqCount:o.eqSet.size };
   });
 
   const vendorMap = new Map();
@@ -1883,6 +1893,28 @@ function computeEffData() {
   const categoryEff = new Map(byCategory.filter(o => o.eff != null).map(o => [o.c, o.eff]));
   const totalMeasuredMd = workforce.reduce((sum, o) => sum + o.measuredMd, 0);
   const fallbackEff = totalMeasuredMd > 0 ? allocatedDiff * 100 / totalMeasuredMd : 0;
+  // ── 공종보정 잔여소화율 ──────────────────────────────────────────
+  // 같은 공종 구성의 평균 소화율 대비 몇 배인지로 보정한다.
+  const categoryAbsorb = new Map();
+  {
+    const agg = new Map();   // 공종 → {credit, headroom}
+    for (const o of workforce) {
+      for (const [c, hr] of o.catHeadroom.entries()) {
+        if (!agg.has(c)) agg.set(c, { credit:0, headroom:0 });
+        agg.get(c).headroom += hr;
+        agg.get(c).credit += (o.catCredit.get(c) || 0);
+      }
+    }
+    for (const [c, a] of agg.entries()) {
+      if (a.headroom > 0.01) categoryAbsorb.set(c, a.credit / a.headroom);
+    }
+  }
+  const overallAbsorb = (() => {
+    const hr = workforce.reduce((s, o) => s + o.headroom, 0);
+    const cr = workforce.reduce((s, o) => s + o.credit, 0);
+    return hr > 0.01 ? cr / hr : 0;
+  })();
+
   const candidatePool = workforce.filter(o => (
     o.eff != null
     && o.credit > 0
@@ -1903,23 +1935,43 @@ function computeEffData() {
     const dayConfidence = Math.min(1, o.measuredDays / EFF_SELECT_CONF_DAYS);
     const confidence = Math.sqrt(mdConfidence * dayConfidence);
     const adjustedIndex = 100 + confidence * (categoryIndex - 100);
-    return { ...o, mainCategory:mostCommonMapKey(o.catMd, '-'), expectedEff, categoryIndex, confidence, adjustedIndex };
+    // 공종 구성을 반영한 기대 소화율 대비 지수
+    let expAbsSum = 0, expAbsHr = 0;
+    for (const [c, hr] of o.catHeadroom.entries()) {
+      const bm = categoryAbsorb.get(c);
+      if (bm == null || hr <= 0) continue;
+      expAbsSum += bm * hr; expAbsHr += hr;
+    }
+    const expectedAbsorb = expAbsHr > 0 ? expAbsSum / expAbsHr : overallAbsorb;
+    const absorbIndex = (o.absorb != null && expectedAbsorb > 0) ? o.absorb / expectedAbsorb * 100 : 0;
+    const adjustedAbsorb = 100 + confidence * (absorbIndex - 100);
+    return { ...o, mainCategory:mostCommonMapKey(o.catMd, '-'), expectedEff, categoryIndex, confidence, adjustedIndex,
+             expectedAbsorb, absorbIndex, adjustedAbsorb };
   });
   const adjustedValues = candidatePool.map(o => o.adjustedIndex).sort((a,b) => a-b);
-  const percentileOf = value => {
-    if (adjustedValues.length <= 1) return 100;
+  const absorbValues = candidatePool.map(o => o.adjustedAbsorb).sort((a,b) => a-b);
+  const volumeValues = candidatePool.map(o => o.credit).sort((a,b) => a-b);
+  const pctOf = (sorted, value) => {
+    if (sorted.length <= 1) return 100;
     let below = 0, equal = 0;
-    for (const x of adjustedValues) {
+    for (const x of sorted) {
       if (x < value - 1e-9) below++;
       else if (Math.abs(x - value) <= 1e-9) equal++;
     }
-    return (below + Math.max(0, equal - 1) / 2) / (adjustedValues.length - 1) * 100;
+    return (below + Math.max(0, equal - 1) / 2) / (sorted.length - 1) * 100;
   };
+  const percentileOf = value => pctOf(adjustedValues, value);
   const candidateRanking = candidatePool.map(o => {
-    const performancePercentile = percentileOf(o.adjustedIndex);
-    const selectionScore = performancePercentile * 0.70 + o.confidence * 100 * 0.20 + Math.min(1, o.measuredShare) * 100 * 0.10;
-    return { ...o, performancePercentile, selectionScore };
-  }).sort((a,b) => b.selectionScore-a.selectionScore || b.adjustedIndex-a.adjustedIndex || b.measuredMd-a.measuredMd)
+    const performancePercentile = percentileOf(o.adjustedIndex);   // 공수당 효율 순위
+    const absorbPercentile = pctOf(absorbValues, o.adjustedAbsorb); // 잔여소화율 순위
+    const volumePercentile = pctOf(volumeValues, o.credit);         // 총변화량 순위
+    // [2026-08-15] 잔여소화율 50 + 총변화량 25 + 공수당 효율 15 + 표본신뢰도 10
+    const selectionScore = absorbPercentile * 0.50
+                         + volumePercentile * 0.25
+                         + performancePercentile * 0.15
+                         + o.confidence * 100 * 0.10;
+    return { ...o, performancePercentile, absorbPercentile, volumePercentile, selectionScore };
+  }).sort((a,b) => b.selectionScore-a.selectionScore || b.adjustedAbsorb-a.adjustedAbsorb || b.measuredMd-a.measuredMd)
     .map((o, i) => ({ ...o, rank:i+1 }));
   const candidates = candidateRanking.slice(0, EFF_SELECT_TOP);
   const scatter = byWorker.filter(o => o.eff != null && !o.sampleLow).map(o => ({ x:o.measuredMd, y:o.credit*100, v:o.v, label:o.w + ' (설비 ' + o.eqCount + ')' }));
@@ -1969,9 +2021,10 @@ function exportEffXlsx() {
   ]));
   const s3 = [['업체','설비','총변화(%p)','설치공수','효율(%p/공수)']];
   d.byEquip.forEach(o => s3.push([o.v, o.e, r1(o.sumDiff * 100), r1(o.sumMd), o.eff == null ? '' : r1(o.eff)]));
-  const s4 = [['순위','기술인','업체','주공종','선발점수','공종보정지수','표본신뢰도(%)','설치공수','측정일수','설치업무비율(%)','검증배분진척(%p)','원효율(%p/M/D)']];
+  const s4 = [['순위','기술인','업체','주공종','선발점수','잔여소화율(%)','소화보정지수','공종보정지수','표본신뢰도(%)','설치공수','측정일수','설치업무비율(%)','검증배분진척(%p)','원효율(%p/M/D)']];
   d.candidateRanking.forEach(o => s4.push([
-    o.rank, o.w, o.v, o.mainCategory, r1(o.selectionScore), r1(o.adjustedIndex), r1(o.confidence*100),
+    o.rank, o.w, o.v, o.mainCategory, r1(o.selectionScore),
+    o.absorb == null ? '' : r1(o.absorb*100), r1(o.adjustedAbsorb), r1(o.adjustedIndex), r1(o.confidence*100),
     r1(o.measuredMd), o.measuredDays, r1(o.measuredShare*100), r1(o.credit*100), r1(o.eff)
   ]));
   const baseName = 'BBTECH_인력성과_' + d.pStart + '_' + d.pEnd;
@@ -2056,7 +2109,7 @@ function candidateTableHtml(d) {
   if (!d.candidates.length) {
     return h + '<div style="font-size:11px;color:#999;padding:10px 2px;">선택 기간과 공정에서 선발 기준을 충족한 기술인이 없습니다.</div></div>';
   }
-  h += '<div style="overflow-x:auto;"><table style="width:100%;min-width:960px;border-collapse:collapse;">'
+  h += '<div style="overflow-x:auto;"><table style="width:100%;min-width:1120px;border-collapse:collapse;">'
     + '<thead><tr style="background:#f8fafc;">'
     + '<th style="padding:6px 8px;font-size:10px;color:#777;text-align:center;width:34px;">순위</th>'
     + '<th style="padding:6px 8px;font-size:10px;color:#555;text-align:left;">기술인</th>'
@@ -2065,6 +2118,8 @@ function candidateTableHtml(d) {
     + '<th style="padding:6px 8px;font-size:10px;color:#555;text-align:right;">설치공수</th>'
     + '<th style="padding:6px 8px;font-size:10px;color:#555;text-align:right;">측정일</th>'
     + '<th style="padding:6px 8px;font-size:10px;color:#555;text-align:right;">검증 배분진척</th>'
+    + '<th title="배분진척 ÷ 착수 시점에 남아 있던 여유. 마무리 구간과 착수 구간을 공평하게 비교합니다." style="padding:6px 8px;font-size:10px;color:#222;font-weight:700;text-align:right;">잔여소화율</th>'
+    + '<th title="같은 공종 구성의 평균 소화율을 100으로 본 지수" style="padding:6px 8px;font-size:10px;color:#555;text-align:right;">소화보정지수</th>'
     + '<th style="padding:6px 8px;font-size:10px;color:#555;text-align:right;">원효율</th>'
     + '<th title="100은 같은 공종 구성의 평균" style="padding:6px 8px;font-size:10px;color:#555;text-align:right;">공종보정지수</th>'
     + '<th style="padding:6px 8px;font-size:10px;color:#555;text-align:right;">표본신뢰도</th>'
@@ -2081,13 +2136,20 @@ function candidateTableHtml(d) {
       + '<td style="padding:7px 8px;font-size:11px;text-align:right;">'+f(o.measuredMd)+'</td>'
       + '<td style="padding:7px 8px;font-size:11px;text-align:right;">'+o.measuredDays+'일</td>'
       + '<td style="padding:7px 8px;font-size:11px;text-align:right;color:#2E7D32;font-weight:600;">'+f(o.credit*100)+'%p</td>'
+      + '<td style="padding:7px 8px;font-size:12px;text-align:right;font-weight:700;color:'+(o.absorb==null?'#bbb':o.absorb>=0.6?'#1f7a3d':o.absorb>=0.4?'#1f6f8b':'#666')+';">'+(o.absorb==null?'-':f(o.absorb*100)+'%')+'</td>'
+      + '<td style="padding:7px 8px;font-size:11px;text-align:right;color:'+(o.adjustedAbsorb>=120?'#1f7a3d':o.adjustedAbsorb>=100?'#1f6f8b':'#666')+';">'+f(o.adjustedAbsorb)+'</td>'
       + '<td style="padding:7px 8px;font-size:11px;text-align:right;">'+f(o.eff)+'</td>'
       + '<td title="같은 공종 구성 평균=100, 표본 신뢰도로 평균 쪽에 보정" style="padding:7px 8px;font-size:11px;text-align:right;color:'+indexColor+';font-weight:700;">'+f(o.adjustedIndex)+'</td>'
       + '<td style="padding:7px 8px;font-size:11px;text-align:right;">'+f(o.confidence*100)+'%</td>'
       + '<td style="padding:7px 10px;font-size:12px;text-align:right;font-weight:800;color:#1f7a3d;">'+f(o.selectionScore)+'</td>'
       + '</tr>';
   });
-  return h + '</tbody></table></div><div style="font-size:10px;color:#888;line-height:1.5;margin-top:7px;">선발점수 = 공종보정 효율 순위 70% + 표본신뢰도 20% + 설치업무 비율 10%. 신규 작업셀의 최초 보고 진척은 설비 총진척에는 포함하지만 기술인 선발 성과에서는 제외합니다.</div></div>';
+  return h + '</tbody></table></div><div style="font-size:10px;color:#888;line-height:1.6;margin-top:7px;">'
+    + '<b style="color:#555;">선발점수</b> = 잔여소화율 순위 50% + 총변화량 순위 25% + 공수당 효율 순위 15% + 표본신뢰도 10%<br>'
+    + '<b style="color:#555;">잔여소화율</b> = 검증 배분진척 ÷ 착수 시점에 남아 있던 여유. 90%대 마무리 구간과 0%대 착수 구간을 공평하게 비교하기 위한 주지표입니다.<br>'
+    + '공동 작업 설비의 진척은 설치공수 비율로 배분되어 중복 계상되지 않습니다. 신규 작업셀의 최초 보고 진척은 설비 총진척에는 포함하지만 기술인 선발 성과에서는 제외합니다.<br>'
+    + '<span style="color:#9a6700;">권장</span> 매월 선발 시 전체 상위 인원과 별도로 협력사별 1명을 함께 선발하면 인원이 적은 업체도 후보를 낼 수 있습니다. 진척률은 자기보고 값이므로 FINAL 100% 확정 시점에 과거 보고와 대조하는 사후 정산을 병행하세요.'
+    + '</div></div>';
 }
 function workforceTableHtml(d) {
   const rows = workforceModeRows(d.workforce.slice(), _workforceMode);
@@ -2233,6 +2295,9 @@ function effSectionHtml() {
 // ── 수정 이력 (최신순) ──────────────────────────────────────────────
 const REVISIONS = [
   { date: '2026-08-15', items: [
+    '우수 기술인 후보에 잔여소화율(배분진척 ÷ 착수 시점 잔여여유)과 소화보정지수 열을 추가 — 마무리 구간 담당자가 불리해지던 천장 효과를 보정',
+    '선발점수 산식을 잔여소화율 50% + 총변화량 25% + 공수당 효율 15% + 표본신뢰도 10%로 변경',
+    '인력 성과 다운로드의 우수 기술인 후보 시트에 잔여소화율·소화보정지수 열 반영',
     '기술인·공종·설비별 진척 변화 표에 총변화 %p(담당 설비 전체 합계)와 공수당 변화 열을 추가',
     '동일 설비를 여러 기술인이 함께 작업한 경우 진척이 인원수만큼 중복 계상되던 문제를 수정 — 설치공수 비율로 배분하고 \'공동 N\' 배지 표시',
     '순위 정렬 기준을 설비 1대당 평균 변화에서 총변화량으로 변경 — 설비 대수가 많은 기술인의 산출량이 정상 반영됨',
@@ -2338,8 +2403,8 @@ const CALC_ITEMS = [
     formula: '설비×공종×PRE/FINAL의 검증된 진척 증가를 갱신 구간의 기술인별 설치공수 비율로 배분 · 설치효율 = 검증 배분진척(%p) ÷ 설치공수(M/D)',
     note: '진척은 셀마다 한 번만 계산하므로 여러 기술인에게 중복 귀속되지 않음. 기간 직전 이력이 없는 신규 셀의 최초 보고 진척은 설비 총진척에는 포함하지만 개인 효율에서는 제외. 출근공수는 이메일×작업일 기준 1교대 가중치를 그날 기록에 나눠 배분. 설치공수 2.0 M/D 또는 측정 2일 미만은 값은 표시하되 표본부족으로 구분.' },
   { name: '우수 기술인 후보 선발',
-    formula: '선발점수 = 공종보정 효율 순위 70% + 표본신뢰도 20% + 설치업무 비율 10%',
-    note: '후보 기준: 설치공수 10 M/D 이상, 측정 5일 이상, 설치업무 비율 50% 이상. 공종보정지수 100은 같은 공종 구성의 평균이며, 설치공수 20 M/D·측정 10일에 가까울수록 표본신뢰도가 높아짐. 순위는 선택 기간과 공정 필터에 따라 다시 계산.' },
+    formula: '선발점수 = 잔여소화율 순위 50% + 총변화량 순위 25% + 공수당 효율 순위 15% + 표본신뢰도 10%',
+    note: '잔여소화율 = 검증 배분진척 ÷ 착수 시점에 남아 있던 여유. 90%대 마무리 구간과 0%대 착수 구간을 공평하게 비교하기 위한 주지표. 후보 기준: 설치공수 10 M/D 이상, 측정 5일 이상, 설치업무 비율 50% 이상. 소화보정지수·공종보정지수 100은 같은 공종 구성의 평균이며, 설치공수 20 M/D·측정 10일에 가까울수록 표본신뢰도가 높아짐. 순위는 선택 기간과 공정 필터에 따라 다시 계산.' },
   { name: '용접·사외제작·지원 공수',
     formula: '출근공수 = 설치공수 + 용접공수 + 사외제작공수 + 지원공수 + 미분류공수',
     note: '사람을 한 유형으로 제외하지 않고 행 단위 업무유형으로 집계. 용접은 Size-Welding Point를 함께 표시하며, 사외제작·지원은 진척 효율을 만들지 않고 공수와 투입일수로 표시.' },
