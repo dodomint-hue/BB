@@ -14,7 +14,7 @@ if (location.protocol === 'file:') {
 }
 </script>
 <script>
-window.BBTECH_BUILD = '2026-10-17.1';
+window.BBTECH_BUILD = '2026-10-17.2';
 if (typeof window.Chart === 'undefined') {
   window.Chart = class ChartFallback {
     constructor(ctx, config) {
@@ -2299,6 +2299,7 @@ const REVISIONS = [
     '웹 배포 화면에서 자동 동기화 체크박스를 켜고 끌 수 있도록 변경 — 선택 상태는 브라우저별로 유지',
     'TAT 완료 판정의 소수 계산 오차 수정 — 공종 진척이 정확히 80%(FINAL)인 설비가 완료로 잡히지 않고 진행중 경과일이 계속 늘던 문제',
     '브라우저에 저장 데이터가 있는 상태로 다시 접속하면 초기화 오류로 동기화가 실패하고 TAT 등 화면이 갱신되지 않던 문제 수정',
+    'TAT에 구간별 TAT 추가 — 시작·종료 진척(%)을 골라 공종별 소요일 평균·중앙값·범위·진행중 셀을 보고, 행을 눌러 설비 목록 확인·엑셀 받기',
   ]},
   { date: '2026-08-15', items: [
     '우수 기술인 후보에 잔여소화율(배분진척 ÷ 착수 시점 잔여여유)과 소화보정지수 열을 추가 — 마무리 구간 담당자가 불리해지던 천장 효과를 보정',
@@ -5419,6 +5420,186 @@ function openTatModal(eq){
   document.getElementById('hmModalBody').innerHTML = h;
   document.getElementById('hmModalOverlay').style.display = 'flex';
 }
+// ── [2026-10-17] 구간별 TAT — 공종별로 진척 a% → b% 도달까지 걸린 일수 ──────────
+const TAT_RANGE_KEY = 'bbtech_tat_range';
+const TAT_RANGE_PRESETS = [
+  { label:'실측', from:10, to:20 }, { label:'서포트', from:20, to:30 }, { label:'설치', from:30, to:80 },
+  { label:'품질', from:80, to:90 }, { label:'턴온', from:90, to:100 }, { label:'착수→완료', from:10, to:80 },
+];
+let _tatRange = (function(){
+  try {
+    const o = JSON.parse(localStorage.getItem(TAT_RANGE_KEY));
+    if (o && o.from >= 10 && o.from <= 90 && o.to <= 100 && o.to > o.from) return { from:o.from, to:o.to };
+  } catch(e){}
+  return { from:30, to:80 };
+})();
+let _tatRangeData = null;
+function setTatRange(from, to) {
+  from = Number(from); to = Number(to);
+  if (!(from >= 10 && from <= 90)) from = 30;
+  if (!(to >= 20 && to <= 100)) to = 80;
+  if (to <= from) to = Math.min(100, from + 10);
+  _tatRange = { from, to };
+  try { localStorage.setItem(TAT_RANGE_KEY, JSON.stringify(_tatRange)); } catch(e){}
+  renderTATSection();
+}
+// 셀(설비×공종)마다 가중 진척(PRE 70%·FINAL 30%, TAT와 동일)이 from%·to%에 처음 도달한 날을 찾는다.
+// 첫 보고부터 이미 from% 이상인 셀은 실제 시작일을 알 수 없으므로 '시작 미관측'으로 분리한다.
+function computeRangeTAT(fromPct, toPct) {
+  const lo = fromPct / 100, hi = toPct / 100, today = cstToday();
+  const recs = (Array.isArray(_stored)?_stored:[]).filter(r => r && r.d && isValidEquip(r.e) && typeof r.p === 'number' && r.c !== '용접사');
+  const cellMap = new Map();
+  for (const r of recs) {
+    const c = catOfR(r); if (!c) continue;
+    const k = r.e + '\u0001' + c;
+    let cell = cellMap.get(k);
+    if (!cell) { cell = { eq:r.e, v:r.v||'', c, rs:[] }; cellMap.set(k, cell); }
+    cell.rs.push(r);
+  }
+  const cells = [];
+  for (const cell of cellMap.values()) {
+    const rs = cell.rs.slice().sort((a,b) => a.d < b.d ? -1 : a.d > b.d ? 1 : 0);
+    const cm = { pre:0, final:0 };
+    const cw = () => PROG_PRE_W * Math.max(cm.pre, cm.final) + PROG_FINAL_W * cm.final;
+    let firstW = null, sd = null, ed = null;
+    for (let i = 0; i < rs.length; ) {
+      const d = rs[i].d;
+      for (; i < rs.length && rs[i].d === d; i++) {
+        const r = rs[i];
+        if (r.ph === 'FINAL') { if (r.p > cm.final) cm.final = r.p; } else { if (r.p > cm.pre) cm.pre = r.p; }
+      }
+      const w = cw();
+      if (firstW == null) firstW = w;
+      if (sd == null && w >= lo - TAT_EPS) sd = d;
+      if (sd != null && ed == null && w >= hi - TAT_EPS) ed = d;
+    }
+    if (sd == null) continue;   // 아직 시작 %에 도달하지 않은 셀
+    let status, days;
+    if (firstW >= lo - TAT_EPS) { status = 'unobs'; days = ed ? _ddG(sd, ed) : null; }
+    else if (ed) { status = 'done'; days = _ddG(sd, ed); }
+    else { status = 'ongoing'; days = _ddG(sd, today); }
+    cells.push({ eq:cell.eq, v:cell.v, c:cell.c, sd, ed, status, days, cur:Math.round(cw()*100) });
+  }
+  return { from:fromPct, to:toPct, today, cells };
+}
+function tatRangeAgg(cells) {
+  const stat = (cat, list) => {
+    const a = list.filter(x => x.status === 'done').map(x => x.days).sort((p,q) => p - q);
+    const og = list.filter(x => x.status === 'ongoing').map(x => x.days);
+    const n = a.length;
+    return {
+      cat, n,
+      avg: n ? a.reduce((s,v) => s + v, 0) / n : null,
+      med: n ? (n % 2 ? a[(n-1)/2] : (a[n/2-1] + a[n/2]) / 2) : null,
+      min: n ? a[0] : null, max: n ? a[n-1] : null,
+      ongN: og.length, ongAvg: og.length ? og.reduce((s,v) => s + v, 0) / og.length : null,
+      unobs: list.filter(x => x.status === 'unobs').length
+    };
+  };
+  const by = new Map();
+  for (const x of cells) { if (!by.has(x.c)) by.set(x.c, []); by.get(x.c).push(x); }
+  const ord = (c) => { const u = String(c).toUpperCase(); const i = CATEGORY_ORDER.indexOf(u.startsWith('BULK') ? 'BULK' : u); return i < 0 ? 99 : i; };
+  const rows = [...by.entries()].map(([c, list]) => stat(c, list))
+    .sort((a,b) => ord(a.cat) - ord(b.cat) || String(a.cat).localeCompare(String(b.cat)));
+  return { rows, total: stat('전체', cells) };
+}
+function tatRangeList(cat) {
+  const R = _tatRangeData; if (!R) return [];
+  const list = R.cells.filter(x => cat === 'ALL' ? (_tatCat === 'ALL' || x.c === _tatCat) : x.c === cat);
+  const rank = { done:0, ongoing:1, unobs:2 };
+  return list.sort((a,b) => rank[a.status] - rank[b.status] || (b.days||0) - (a.days||0) || (a.eq < b.eq ? -1 : 1));
+}
+function tatRangeBlockHtml(esc) {
+  const R = computeRangeTAT(_tatRange.from, _tatRange.to); _tatRangeData = R;
+  const cells = _tatCat === 'ALL' ? R.cells : R.cells.filter(x => x.c === _tatCat);
+  const agg = tatRangeAgg(cells);
+  const selSt = 'font-size:11px;padding:2px 4px;border:1px solid #ccc;border-radius:4px;font-weight:600;';
+  let fromOpts = '', toOpts = '';
+  for (let p = 10; p <= 90; p += 10) fromOpts += '<option value="'+p+'"'+(p === R.from ? ' selected' : '')+'>'+p+'%</option>';
+  for (let p = R.from + 10; p <= 100; p += 10) toOpts += '<option value="'+p+'"'+(p === R.to ? ' selected' : '')+'>'+p+'%</option>';
+  let h = '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:6px 0 4px;">'
+    + '<span style="font-size:12px;font-weight:700;color:#555;">구간별 TAT</span>'
+    + '<select aria-label="구간 시작 진척" onchange="setTatRange(this.value, _tatRange.to)" style="'+selSt+'">'+fromOpts+'</select>'
+    + '<span style="font-size:11px;color:#888;">→</span>'
+    + '<select aria-label="구간 종료 진척" onchange="setTatRange(_tatRange.from, this.value)" style="'+selSt+'">'+toOpts+'</select>'
+    + '<span style="width:6px;"></span>';
+  for (const ps of TAT_RANGE_PRESETS) {
+    const on = ps.from === R.from && ps.to === R.to;
+    h += '<button onclick="setTatRange('+ps.from+','+ps.to+')" style="padding:2px 9px;font-size:10px;border:1px solid '+(on?'#333':'#ddd')+';border-radius:10px;cursor:pointer;background:'+(on?'#333;color:#fff':'#fff;color:#666')+';">'+ps.label+' '+ps.from+'~'+ps.to+'</button>';
+  }
+  h += '</div>';
+  h += '<div style="font-size:10px;color:#aaa;margin-bottom:6px;">공종별로 '+R.from+'%에 처음 도달한 날부터 '+R.to+'%에 처음 도달한 날까지의 일수 · 진척은 위 TAT와 같은 가중 기준(PRE 70% + FINAL 30%)'
+    + ' · 첫 보고부터 이미 '+R.from+'% 이상이던 셀은 시작일을 알 수 없어 평균에서 제외 · 행을 누르면 설비 목록</div>';
+  if (!cells.length) return h + '<div style="font-size:11px;color:#bbb;margin-bottom:12px;">'+R.from+'%에 도달한 셀이 없습니다.</div>';
+  const maxAvg = Math.max(1, ...agg.rows.map(r => r.avg || 0));
+  const th = (t, al) => '<th style="padding:5px 8px;font-size:10px;color:#888;font-weight:600;text-align:'+(al||'right')+';white-space:nowrap;">'+t+'</th>';
+  const d1 = (v) => v == null ? '-' : (Math.round(v * 10) / 10).toLocaleString();
+  const rowHtml = (r, isTotal) => {
+    const col = isTotal ? '#333' : (TAT_CATCOLOR[r.cat] || '#888');
+    const key = isTotal ? 'ALL' : r.cat;
+    const w = r.avg == null ? 0 : Math.max(3, Math.round(r.avg / maxAvg * 100));
+    return '<tr data-cat="'+esc(key)+'" onclick="openTatRangeModal(this.dataset.cat)" title="설비 목록 보기" style="cursor:pointer;border-bottom:1px solid #f3f3f3;'+(isTotal?'background:#fafafa;':'')+'">'
+      + '<td style="padding:4px 8px;font-size:12px;font-weight:'+(isTotal?800:600)+';color:'+col+';white-space:nowrap;">'+esc(r.cat)+'</td>'
+      + '<td style="padding:4px 8px;font-size:11px;text-align:right;">'+r.n+'</td>'
+      + '<td style="padding:4px 8px;min-width:150px;"><div style="display:flex;align-items:center;gap:6px;">'
+      +   '<span style="flex:1;background:'+(isTotal?'transparent':'#f0f0f0')+';border-radius:4px;height:12px;">'+(isTotal||r.avg==null?'':'<span style="display:block;height:100%;width:'+w+'%;background:'+col+';border-radius:4px;"></span>')+'</span>'
+      +   '<b style="font-size:12px;color:#222;min-width:42px;text-align:right;">'+(r.avg == null ? '-' : d1(r.avg)+'일')+'</b></div></td>'
+      + '<td style="padding:4px 8px;font-size:11px;text-align:right;">'+(r.med == null ? '-' : d1(r.med)+'일')+'</td>'
+      + '<td style="padding:4px 8px;font-size:11px;text-align:right;color:#777;white-space:nowrap;">'+(r.n ? r.min+'~'+r.max+'일' : '-')+'</td>'
+      + '<td style="padding:4px 8px;font-size:11px;text-align:right;color:#c0392b;white-space:nowrap;">'+(r.ongN ? r.ongN+' <span style="color:#999;">('+d1(r.ongAvg)+'일째)</span>' : '-')+'</td>'
+      + '<td style="padding:4px 8px;font-size:11px;text-align:right;color:#b26a00;">'+(r.unobs || '-')+'</td></tr>';
+  };
+  h += '<div style="overflow-x:auto;margin-bottom:12px;"><table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#fafafa;">'
+    + th('공종','left') + th('완료 셀') + th('평균 소요일','left') + th('중앙값') + th('최소~최대') + th('진행중 셀') + th('시작 미관측') + '</tr></thead><tbody>';
+  for (const r of agg.rows) h += rowHtml(r, false);
+  if (agg.rows.length > 1) h += rowHtml(agg.total, true);
+  h += '</tbody></table></div>';
+  return h;
+}
+function openTatRangeModal(cat) {
+  const R = _tatRangeData; if (!R) return;
+  const esc = (s) => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const list = tatRangeList(cat);
+  const cnt = (st) => list.filter(x => x.status === st).length;
+  const name = cat === 'ALL' ? (_tatCat === 'ALL' ? '전체' : _tatCat) : cat;
+  document.getElementById('hmModalTitle').textContent = name + ' — 구간 TAT ' + R.from + '% → ' + R.to + '%';
+  document.getElementById('hmModalSub').textContent = '완료 ' + cnt('done') + '셀 · 진행중 ' + cnt('ongoing') + '셀 · 시작 미관측 ' + cnt('unobs') + '셀 (평균 제외)';
+  const th = (t, al) => '<th style="padding:5px 8px;font-size:10px;color:#888;text-align:'+(al||'left')+';white-space:nowrap;">'+t+'</th>';
+  let h = '<div style="margin-bottom:8px;"><button data-cat="'+esc(cat)+'" onclick="downloadTatRange(this.dataset.cat)" style="background:#1f7a3d;color:#fff;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer;">엑셀로 받기</button></div>';
+  h += '<table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#fafafa;">'
+    + th('설비') + th('업체') + th('공종') + th(R.from+'% 도달') + th(R.to+'% 도달') + th('소요일','right') + th('현재','right') + th('상태') + '</tr></thead><tbody>';
+  for (const x of list) {
+    const col = TAT_CATCOLOR[x.c] || '#888';
+    const st = x.status === 'done' ? '<span style="color:#1f7a3d;">완료</span>'
+      : x.status === 'ongoing' ? '<span style="color:#c0392b;">진행중</span>'
+      : '<span style="color:#b26a00;">시작 미관측</span>';
+    const days = x.days == null ? '-' : (x.status === 'ongoing' ? x.days + '일째' : x.days + '일');
+    h += '<tr style="border-bottom:1px solid #f7f7f7;">'
+      + '<td style="padding:4px 8px;font-size:12px;font-weight:600;">'+esc(x.eq)+'</td>'
+      + '<td style="padding:4px 8px;font-size:11px;color:#666;">'+esc(x.v)+'</td>'
+      + '<td style="padding:4px 8px;font-size:11px;font-weight:600;color:'+col+';">'+esc(x.c)+'</td>'
+      + '<td style="padding:4px 8px;font-size:11px;">'+x.sd+'</td>'
+      + '<td style="padding:4px 8px;font-size:11px;">'+(x.ed || '-')+'</td>'
+      + '<td style="padding:4px 8px;font-size:12px;text-align:right;font-weight:600;'+(x.status==='unobs'?'color:#aaa;':'')+'">'+days+'</td>'
+      + '<td style="padding:4px 8px;font-size:11px;text-align:right;">'+x.cur+'%</td>'
+      + '<td style="padding:4px 8px;font-size:11px;">'+st+'</td></tr>';
+  }
+  h += '</tbody></table>';
+  document.getElementById('hmModalBody').innerHTML = h;
+  document.getElementById('hmModalOverlay').style.display = 'flex';
+}
+function downloadTatRange(cat) {
+  const R = _tatRangeData; if (!R) return;
+  if (typeof XLSX === 'undefined') { alert('엑셀 기능을 불러오지 못했습니다. 새로고침 후 다시 시도하세요.'); return; }
+  const list = tatRangeList(cat);
+  const label = { done:'완료', ongoing:'진행중', unobs:'시작 미관측(평균 제외)' };
+  const aoa = [['설비명', '업체', '공종', R.from+'% 도달일', R.to+'% 도달일', '소요일', '현재 진척(%)', '상태']];
+  for (const x of list) aoa.push([x.eq, x.v, x.c, x.sd, x.ed || '', x.days == null ? '' : x.days, x.cur, label[x.status]]);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), '구간TAT');
+  const name = (cat === 'ALL' ? (_tatCat === 'ALL' ? '전체' : _tatCat) : cat).replace(/[\\/:*?"<>|]/g, '_');
+  XLSX.writeFile(wb, 'BBTECH_구간TAT_' + R.from + '-' + R.to + '_' + name + '.xlsx');
+}
 function renderTATSection() {
   const el = document.getElementById('tatSection'); if (!el) return;
   const d = computeTAT(); _tatData = d;
@@ -5487,6 +5668,9 @@ function renderTATSection() {
     }
     h += '</div>';
   }
+
+  // [2026-10-17] 구간별 TAT (공종별 a% → b%)
+  h += tatRangeBlockHtml(esc);
 
   // 설비별 간트 (착수~완료/오늘) — sel(공종필터 적용됨)에서 불완전 표시/정렬
   let eqs = sel.slice();
