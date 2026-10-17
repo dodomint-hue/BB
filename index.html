@@ -14,7 +14,7 @@ if (location.protocol === 'file:') {
 }
 </script>
 <script>
-window.BBTECH_BUILD = '2026-10-17.2';
+window.BBTECH_BUILD = '2026-10-17.3';
 if (typeof window.Chart === 'undefined') {
   window.Chart = class ChartFallback {
     constructor(ctx, config) {
@@ -2300,6 +2300,7 @@ const REVISIONS = [
     'TAT 완료 판정의 소수 계산 오차 수정 — 공종 진척이 정확히 80%(FINAL)인 설비가 완료로 잡히지 않고 진행중 경과일이 계속 늘던 문제',
     '브라우저에 저장 데이터가 있는 상태로 다시 접속하면 초기화 오류로 동기화가 실패하고 TAT 등 화면이 갱신되지 않던 문제 수정',
     'TAT에 구간별 TAT 추가 — 시작·종료 진척(%)을 골라 공종별 소요일 평균·중앙값·범위·진행중 셀을 보고, 행을 눌러 설비 목록 확인·엑셀 받기',
+    '구간별 TAT에 PRE 구간(10→70%)·FINAL 구간(70→100%) 바로가기 버튼 추가',
   ]},
   { date: '2026-08-15', items: [
     '우수 기술인 후보에 잔여소화율(배분진척 ÷ 착수 시점 잔여여유)과 소화보정지수 열을 추가 — 마무리 구간 담당자가 불리해지던 천장 효과를 보정',
@@ -5422,7 +5423,9 @@ function openTatModal(eq){
 }
 // ── [2026-10-17] 구간별 TAT — 공종별로 진척 a% → b% 도달까지 걸린 일수 ──────────
 const TAT_RANGE_KEY = 'bbtech_tat_range';
+// PRE 70% + FINAL 30% → 전체 진척 0~70%는 PRE, 70% 초과는 FINAL 진척으로만 도달
 const TAT_RANGE_PRESETS = [
+  { label:'PRE 구간', from:10, to:70, phase:true }, { label:'FINAL 구간', from:70, to:100, phase:true },
   { label:'실측', from:10, to:20 }, { label:'서포트', from:20, to:30 }, { label:'설치', from:30, to:80 },
   { label:'품질', from:80, to:90 }, { label:'턴온', from:90, to:100 }, { label:'착수→완료', from:10, to:80 },
 ];
@@ -5523,12 +5526,15 @@ function tatRangeBlockHtml(esc) {
     + '<span style="font-size:11px;color:#888;">→</span>'
     + '<select aria-label="구간 종료 진척" onchange="setTatRange(_tatRange.from, this.value)" style="'+selSt+'">'+toOpts+'</select>'
     + '<span style="width:6px;"></span>';
+  let sepDone = false;
   for (const ps of TAT_RANGE_PRESETS) {
+    if (!ps.phase && !sepDone) { h += '<span style="width:1px;height:14px;background:#ddd;margin:0 2px;"></span>'; sepDone = true; }
     const on = ps.from === R.from && ps.to === R.to;
-    h += '<button onclick="setTatRange('+ps.from+','+ps.to+')" style="padding:2px 9px;font-size:10px;border:1px solid '+(on?'#333':'#ddd')+';border-radius:10px;cursor:pointer;background:'+(on?'#333;color:#fff':'#fff;color:#666')+';">'+ps.label+' '+ps.from+'~'+ps.to+'</button>';
+    const bd = on ? '#333' : (ps.phase ? '#9aa5b1' : '#ddd');
+    h += '<button onclick="setTatRange('+ps.from+','+ps.to+')" style="padding:2px 9px;font-size:10px;font-weight:'+(ps.phase?700:400)+';border:1px solid '+bd+';border-radius:10px;cursor:pointer;background:'+(on?'#333;color:#fff':'#fff;color:'+(ps.phase?'#333':'#666'))+';">'+ps.label+' '+ps.from+'~'+ps.to+'</button>';
   }
   h += '</div>';
-  h += '<div style="font-size:10px;color:#aaa;margin-bottom:6px;">공종별로 '+R.from+'%에 처음 도달한 날부터 '+R.to+'%에 처음 도달한 날까지의 일수 · 진척은 위 TAT와 같은 가중 기준(PRE 70% + FINAL 30%)'
+  h += '<div style="font-size:10px;color:#aaa;margin-bottom:6px;">공종별로 '+R.from+'%에 처음 도달한 날부터 '+R.to+'%에 처음 도달한 날까지의 일수 · 진척은 위 TAT와 같은 기준(PRE 70% + FINAL 30% — 70% 초과는 FINAL 진척으로만 도달)'
     + ' · 첫 보고부터 이미 '+R.from+'% 이상이던 셀은 시작일을 알 수 없어 평균에서 제외 · 행을 누르면 설비 목록</div>';
   if (!cells.length) return h + '<div style="font-size:11px;color:#bbb;margin-bottom:12px;">'+R.from+'%에 도달한 셀이 없습니다.</div>';
   const maxAvg = Math.max(1, ...agg.rows.map(r => r.avg || 0));
