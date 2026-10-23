@@ -7,6 +7,15 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
+// [2026-10-17] GitHub Pages 주소(…github.io)는 파일만 보여 주고 /api/sheet 중계기를 실행하지 못한다.
+//              그 주소로 열면 시트를 못 받고 저장본만 보이므로 Cloudflare Pages 주소로 바로 옮긴다.
+(function () {
+  try {
+    if (/\.github\.io$/i.test(location.hostname)) {
+      location.replace('https://bb-dashboard-d0q.pages.dev/' + location.search + location.hash);
+    }
+  } catch (e) {}
+})();
 // [2026-08-15] 저장본 sheet-data.js(약 2.5MB)는 file: 직접 실행일 때만 미리 읽는다.
 // 웹(Cloudflare Pages)에서는 /api/sheet 가 실패했을 때만 지연 로딩한다.
 if (location.protocol === 'file:') {
@@ -14,7 +23,7 @@ if (location.protocol === 'file:') {
 }
 </script>
 <script>
-window.BBTECH_BUILD = '2026-10-17.3';
+window.BBTECH_BUILD = '2026-10-17.5';
 if (typeof window.Chart === 'undefined') {
   window.Chart = class ChartFallback {
     constructor(ctx, config) {
@@ -1419,6 +1428,11 @@ function exportTypoReport(){
 }
 function triggerEqMasterUpload(){ const el=document.getElementById('eqMasterInput'); if(el) el.click(); }
 
+// [2026-10-17] 미제출자 산출에서 일요일은 작업일로 보지 않는다 (CST 날짜 문자열 기준)
+function _isSundayDate(d) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(d||''))) return false;
+  return new Date(d + 'T00:00:00Z').getUTCDay() === 0;
+}
 function openRosterCheckModal() {
   const esc = (s) => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   document.getElementById('hmModalTitle').textContent = '👥 레포트 미제출자';
@@ -1433,17 +1447,19 @@ function openRosterCheckModal() {
   const pEnd = _rosterEnd || ((b && b.value) ? b.value : cstToday());
   const pStart = _rosterStart || ((a && a.value) ? a.value : pEnd);
   // 기간 내 "보고가 실제로 존재한 날짜" 목록 (그 날 아무도 안 올렸으면 미제출 판정 대상에서 제외)
-  const workdaySet = new Set();
+  const workdaySet = new Set(), sundaySet = new Set();
   // 날짜별 보고자(이메일·이름) 집합
   const byDateEmail = new Map(), byDateName = new Map();
   for (const r of (_stored||[])) {
     if (r.d < pStart || r.d > pEnd) continue;
+    if (_isSundayDate(r.d)) { sundaySet.add(r.d); continue; }   // 일요일 제외
     workdaySet.add(r.d);
     if (!byDateEmail.has(r.d)) { byDateEmail.set(r.d, new Set()); byDateName.set(r.d, new Set()); }
     if (r.email) byDateEmail.get(r.d).add(String(r.email).toLowerCase().trim());
     if (r.w) byDateName.get(r.d).add(_normName(r.w));
   }
-  const workdays = [...workdaySet].sort();   // 보고가 1건이라도 있던 날짜들
+  const workdays = [...workdaySet].sort();   // 보고가 1건이라도 있던 날짜들 (일요일 제외)
+  const sunTxt = sundaySet.size ? '(일요일 ' + sundaySet.size + '일 제외)' : '(일요일 제외)';
 
   // 퇴사자 제외: 재직자만 미제출 판정 대상
   const activeRoster = _roster.filter(p => !p.left);
@@ -1474,7 +1490,7 @@ function openRosterCheckModal() {
   missing.sort((x,y) => y.missCount - x.missCount);
   const periodTxt = (pStart===pEnd) ? pStart : (pStart + ' ~ ' + pEnd);
   document.getElementById('hmModalSub').textContent =
-    '기간 ' + periodTxt + ' · 작업일 ' + workdays.length + '일 · 재직 ' + activeRoster.length + '명' + (leftCount ? ' (퇴사 ' + leftCount + '명 제외)' : '') + ' · 전일제출 ' + submitted.length + '명 · 미제출(일부 포함) ' + missing.length + '명';
+    '기간 ' + periodTxt + ' · 작업일 ' + workdays.length + '일' + sunTxt + ' · 재직 ' + activeRoster.length + '명' + (leftCount ? ' (퇴사 ' + leftCount + '명 제외)' : '') + ' · 전일제출 ' + submitted.length + '명 · 미제출(일부 포함) ' + missing.length + '명';
 
   // 업체별 미제출 그룹
   const byV = {};
@@ -1492,9 +1508,11 @@ function openRosterCheckModal() {
     + '<button onclick="openRosterEditModal()" style="background:#fff;color:#374151;border:1px solid #ccc;padding:4px 10px;border-radius:4px;font-size:12px;cursor:pointer;">✏️ 명단 편집</button>'
     + '</div>';
   if (!workdays.length) {
-    h += '<div style="font-size:13px;color:#888;padding:10px 0;">선택한 기간에 보고 데이터가 없습니다. 날짜를 확인하세요.</div>';
+    h += '<div style="font-size:13px;color:#888;padding:10px 0;">' + (sundaySet.size
+      ? '선택한 기간에는 일요일 보고만 있어 미제출 판정 대상 작업일이 없습니다.'
+      : '선택한 기간에 보고 데이터가 없습니다. 날짜를 확인하세요.') + '</div>';
   } else if (!missing.length) {
-    h += '<div style="font-size:13px;color:#1f7a3d;padding:10px 0;font-weight:600;">✅ 작업일 '+workdays.length+'일 전원 제출 완료</div>';
+    h += '<div style="font-size:13px;color:#1f7a3d;padding:10px 0;font-weight:600;">✅ 작업일 '+workdays.length+'일'+sunTxt+' 전원 제출 완료</div>';
   } else {
     const allEmails = missing.filter(p=>p.email).map(p=>p.email).join('; ');
     h += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">'
@@ -1502,7 +1520,7 @@ function openRosterCheckModal() {
       + '<button onclick="exportMissingXlsx()" style="background:#374151;color:#fff;border:none;padding:6px 12px;border-radius:5px;font-size:12px;cursor:pointer;">📥 엑셀 내보내기 (날짜별)</button>'
       + '<button onclick="exportMissingPng()" style="background:#6f42c1;color:#fff;border:none;padding:6px 12px;border-radius:5px;font-size:12px;cursor:pointer;">🖼️ 이미지 저장</button></div>';
     h += '<textarea id="missEmails" style="width:100%;height:42px;font-size:11px;border:1px solid #ddd;border-radius:5px;padding:6px;box-sizing:border-box;color:#555;">'+esc(allEmails)+'</textarea>';
-    h += '<div style="font-size:11px;color:#999;margin:6px 0 2px;">대상 작업일('+workdays.length+'일): '+esc(fmtDates(workdays))+'</div>';
+    h += '<div style="font-size:11px;color:#999;margin:6px 0 2px;">대상 작업일('+workdays.length+'일, 일요일 제외): '+esc(fmtDates(workdays))+'</div>';
     for (const v of Object.keys(byV).sort()) {
       const list = byV[v];
       h += '<div style="margin-top:12px;"><div style="font-size:12px;font-weight:700;color:#c0392b;border-bottom:1px solid #f0e0e0;padding-bottom:4px;margin-bottom:5px;">'+esc(v)+' <span style="color:#888;font-weight:400;">'+list.length+'명</span></div>';
@@ -1533,11 +1551,12 @@ let _missingWorkdays = [];
 function exportMissingXlsx() {
   if (typeof XLSX === 'undefined' || !_missingCache.length) return;
   const a = document.getElementById('dcDateA'), b = document.getElementById('dcDateB');
-  const pEnd = (b && b.value) ? b.value : cstToday();
-  const pStart = (a && a.value) ? a.value : pEnd;
+  // [2026-10-17] 파일명 기간을 미제출자 창에서 조회한 기간과 맞춤 (이미지 저장과 동일)
+  const pEnd = _rosterEnd || ((b && b.value) ? b.value : cstToday());
+  const pStart = _rosterStart || ((a && a.value) ? a.value : pEnd);
   const wb = XLSX.utils.book_new();
   // 시트1: 요약 (미제출 일수 + 미제출 날짜 나열)
-  const s1 = [['업체','이름','이메일','미제출 일수','대상 작업일','미제출 날짜']];
+  const s1 = [['업체','이름','이메일','미제출 일수','대상 작업일(일요일 제외)','미제출 날짜']];
   for (const p of _missingCache) s1.push([p.vf||p.v||'', p.name||'', p.email||'', p.missCount, p.workdayN, (p.missDates||[]).join(', ')]);
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(s1), '미제출 요약');
   // 시트2: 날짜 x 사람 매트릭스 (O=제출 / X=미제출)
@@ -1610,7 +1629,7 @@ function exportMissingPng() {
   ctx.fillStyle = '#ffffff';
   ctx.font = 'bold 20px Arial'; ctx.fillText('BBTECH T-PJT 레포트 미제출자', padX, 34);
   ctx.font = '13px Arial'; ctx.fillStyle = '#cdd7e3';
-  ctx.fillText('기간 ' + periodTxt + ' · 작업일 ' + wdN + '일 · 미제출 ' + _missingCache.length + '명', padX, 56);
+  ctx.fillText('기간 ' + periodTxt + ' · 작업일 ' + wdN + '일(일요일 제외) · 미제출 ' + _missingCache.length + '명', padX, 56);
 
   for (const op of ops) {
     if (op.t === 'vh') {
@@ -2301,6 +2320,9 @@ const REVISIONS = [
     '브라우저에 저장 데이터가 있는 상태로 다시 접속하면 초기화 오류로 동기화가 실패하고 TAT 등 화면이 갱신되지 않던 문제 수정',
     'TAT에 구간별 TAT 추가 — 시작·종료 진척(%)을 골라 공종별 소요일 평균·중앙값·범위·진행중 셀을 보고, 행을 눌러 설비 목록 확인·엑셀 받기',
     '구간별 TAT에 PRE 구간(10→70%)·FINAL 구간(70→100%) 바로가기 버튼 추가',
+    '레포트 미제출자 산출에서 일요일 제외 — 일요일은 작업일로 세지 않고 미제출 날짜에도 넣지 않음 (화면·엑셀·이미지 공통)',
+    '미제출자 엑셀 파일명의 기간을 미제출자 창에서 조회한 기간과 일치시킴',
+    'GitHub Pages 주소(github.io)로 열면 Cloudflare Pages 주소로 자동 이동 — github.io에서는 시트 중계기가 없어 HTTP 404로 저장본만 보이던 문제',
   ]},
   { date: '2026-08-15', items: [
     '우수 기술인 후보에 잔여소화율(배분진척 ÷ 착수 시점 잔여여유)과 소화보정지수 열을 추가 — 마무리 구간 담당자가 불리해지던 천장 효과를 보정',
