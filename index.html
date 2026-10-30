@@ -23,7 +23,7 @@ if (location.protocol === 'file:') {
 }
 </script>
 <script>
-window.BBTECH_BUILD = '2026-10-30.1';
+window.BBTECH_BUILD = '2026-10-30.3';
 if (typeof window.Chart === 'undefined') {
   window.Chart = class ChartFallback {
     constructor(ctx, config) {
@@ -553,6 +553,8 @@ document.addEventListener('visibilitychange', () => {
       <div class="kpi-value" id="kpiWorker">0<span class="kpi-unit">명</span></div>
     </div>
   </div>
+
+  <div id="slSection" style="margin-top:10px;"></div>
 
   <div id="stageSection" style="margin-top:10px;"></div>
 
@@ -2355,7 +2357,9 @@ const REVISIONS = [
     '작업일 이상값 자동 제외 — 연도 오타(2016·2025·2027·2926·0202 등), 제출일보다 뒤의 미래 날짜, 제출일 120일 이전 날짜. 동기화 바 제외 내역에 "날짜이상" 건수 표시, 마우스를 올리면 제외된 행 목록 표시',
     '기간별 효율 추이에 선이 안 보이던 문제 수정 — "전체" 기간이 오타 날짜(0202년)부터 잡히던 문제, 기간이 하루면 점이 1개뿐이던 문제(짧은 기간은 최근 14일 추이로 표시)',
     '공정 단계 현황 판정 재정의 — PRE 70%·FINAL 30% 가중 합산값 대신 보고된 원래 진척으로 판정하고 PRE/FINAL 두 줄로 표시(10% 실측 시작이 7%로 계산돼 착수전에, PRE 85%가 59%로 계산돼 설치에 들어가던 문제). 공종이 여러 개인 설비는 공종 평균 대신 가장 늦은 공종 기준. 진척 보고 없이 용접사·지원·사외 보고에만 나온 설비는 착수전이 아닌 "진척 미보고"로 분리. 단계 목록에 공종별 PRE/FINAL 진척 표시',
-    'TAT 공정 단계별 평균 소요일 재정의 — 가중 합산 평균값 대신 공종별 PRE/FINAL 보고값이 단계 하한을 처음 넘은 날로 계산해 PRE·FINAL 두 줄로 표시. 이전에는 실측이 PRE 14~29%, 품질이 FINAL 33~67% 구간으로 잡혔고, 완료(80%) 시점에서 계산을 멈춰 턴온이 항상 0일이었음. 진입일을 알 수 없는 단계(첫 보고에서 이미 넘었거나 한 번에 건너뜀)는 제외, 중앙값 함께 표시'
+    'TAT 공정 단계별 평균 소요일 재정의 — 가중 합산 평균값 대신 공종별 PRE/FINAL 보고값이 단계 하한을 처음 넘은 날로 계산해 PRE·FINAL 두 줄로 표시. 이전에는 실측이 PRE 14~29%, 품질이 FINAL 33~67% 구간으로 잡혔고, 완료(80%) 시점에서 계산을 멈춰 턴온이 항상 0일이었음. 진입일을 알 수 없는 단계(첫 보고에서 이미 넘었거나 한 번에 건너뜀)는 제외, 중앙값 함께 표시',
+    '[.2] PRE에는 품질·턴온 단계가 없으므로 PRE는 착수전·실측·서포트·설치(30~100%)로만 구분 — 공정 단계 현황과 TAT 단계 소요일 모두. 품질·턴온은 FINAL에만 표시',
+    '[.3] SL1+ / SL2 일정(계획 대비) 섹션 추가 — BBTech America Daily Report 엑셀의 설비별 SL1+·SL2 계획일과 세부공종 진척으로 완료·진행중·임박(7일 이내)·지연·미정 집계, 주별 계획 대비 누적 완료 추이, 지연·임박 설비 목록, 설비별 일정표(검색·상태 필터). SL1+ = Bulk Gas·PCW + 진공, SL2 = 전체. 완료는 엑셀 진척 100% 기준이고 시트 FINAL 진척을 함께 표시해 차이 나는 설비 표시. 일정 데이터는 sl-schedule.js(설비별 일정\\일정_가져오기.cmd로 생성)'
   ]},
   { date: '2026-10-17', items: [
     '자동 동기화 주기를 1분에서 15분으로 변경',
@@ -5312,6 +5316,17 @@ function stageOf(p) {
 //  - 설비 상태: 공종 중 가장 늦은 공종 (PRE가 FINAL보다 늦음 → 같은 단계면 진척이 낮은 쪽). 공종 목록은 설비 마스터 우선.
 //  - 진척 보고가 한 건도 없는 설비(용접사·공정 지원·사외 제작 보고에만 등장)는 '미보고'로 따로 센다.
 const STAGE_PHASES = ['PRE', 'FINAL'];
+//  - PRE에는 품질·턴온 단계가 없다 (실측 → 서포트 → 설치 30~100%). 품질·턴온은 FINAL에만 있다.
+//  - FINAL은 착수 자체가 이미 PRE 이후이므로 착수전 칸이 없고 10% 미만도 실측으로 본다.
+const STAGE_DEFS_PH = {
+  PRE:   [...STAGE_DEFS.slice(0, 3), { ...STAGE_DEFS[3], hi: 1.01, desc: '설치 (30~100%)' }],
+  FINAL: STAGE_DEFS.slice(1)
+};
+function stageOfPh(ph, p) {
+  const defs = STAGE_DEFS_PH[ph] || STAGE_DEFS;
+  for (const s of defs) if (p < s.hi - STAGE_EPS) return s;
+  return defs[defs.length-1];
+}
 function equipStageStatus(eq, cats) {
   const master = getEquipMasterCategories(eq);
   const list = (master && master.length) ? master : [...cats.keys()];
@@ -5329,7 +5344,7 @@ function equipStageStatus(eq, cats) {
 let _stageData = {};   // 'PRE|설치' / 'FINAL|턴온' / '미보고' → [{eq, v, p, detail}]
 function openStageModal(key) {
   const [ph, sk] = key.split('|');
-  const def = STAGE_DEFS.find(s => s.key === sk);
+  const def = (STAGE_DEFS_PH[ph] || []).find(s => s.key === sk);
   if (key !== '미보고' && !def) return;
   const color = def ? def.color : '#9ca3af';
   const list = (_stageData[key] || []).slice().sort((a,b) => (b.p - a.p) || (a.eq < b.eq ? -1 : 1));
@@ -5366,17 +5381,16 @@ function renderStageSection(data) {
     if (o[k] == null || r.p > o[k]) o[k] = r.p;
   }
   _stageData = { '미보고': [] };
-  STAGE_PHASES.forEach(ph => STAGE_DEFS.forEach(s => _stageData[ph + '|' + s.key] = []));
+  STAGE_PHASES.forEach(ph => STAGE_DEFS_PH[ph].forEach(s => _stageData[ph + '|' + s.key] = []));
   for (const [eq, cats] of raw) {
     const v = vendorOf.get(eq) || '';
     if (isTurnedOn(eq)) { _stageData['FINAL|턴온'].push({ eq, v, p: 1, detail: '턴온 확인 등록' }); continue; }
     if (!cats.size) { _stageData['미보고'].push({ eq, v, p: 0, n: recCount.get(eq) || 0, detail: '' }); continue; }
     const st = equipStageStatus(eq, cats); if (!st) continue;
-    // FINAL은 착수 자체가 이미 PRE 이후이므로 10% 미만도 실측 칸으로 본다
-    let sd = stageOf(st.p); if (st.ph === 'FINAL' && sd.key === '착수전') sd = STAGE_DEFS[1];
+    const sd = stageOfPh(st.ph, st.p);
     _stageData[st.ph + '|' + sd.key].push({ eq, v, p: st.p, detail: st.detail });
   }
-  const rowTotal = ph => STAGE_DEFS.reduce((s, d) => s + _stageData[ph + '|' + d.key].length, 0);
+  const rowTotal = ph => STAGE_DEFS_PH[ph].reduce((s, d) => s + _stageData[ph + '|' + d.key].length, 0);
   const nNo = _stageData['미보고'].length;
   const total = rowTotal('PRE') + rowTotal('FINAL') + nNo;
   let h = '<div style="border:1px solid #e5e7eb;border-radius:10px;padding:12px 14px;background:#fff;">'
@@ -5385,7 +5399,7 @@ function renderStageSection(data) {
     + '<span onclick="openStageModal(\'미보고\')" title="진척 보고 없이 용접사·공정 지원·사외 제작 보고에만 등장한 설비" style="margin-left:auto;cursor:pointer;font-size:11px;background:#f3f4f6;border:1px solid #d1d5db;border-radius:12px;padding:2px 10px;color:#555;">진척 미보고 <b>' + nNo + '</b>대 ›</span></div>';
   for (const ph of STAGE_PHASES) {
     const rt = rowTotal(ph);
-    const defs = ph === 'FINAL' ? STAGE_DEFS.slice(1) : STAGE_DEFS;
+    const defs = STAGE_DEFS_PH[ph];
     h += '<div style="display:flex;gap:4px;align-items:stretch;margin-bottom:4px;">'
       + '<div style="flex:0 0 56px;display:flex;flex-direction:column;justify-content:center;font-size:11px;font-weight:800;color:#444;">' + ph + '<span style="font-size:10px;font-weight:500;color:#999;">' + rt + '대</span></div>';
     for (const d of defs) {
@@ -5397,7 +5411,7 @@ function renderStageSection(data) {
     }
     h += '</div>';
   }
-  h += '<div style="font-size:10px;color:#aaa;margin-top:6px;">PRE·FINAL 각각 실측 10~20 · 서포트 20~30 · 설치 30~80 · 품질 80~90 · 턴온 90~100 (착수전 &lt;10) · FINAL 보고가 시작된 공종은 FINAL 값, 아니면 PRE 값 · 비율은 줄별</div>';
+  h += '<div style="font-size:10px;color:#aaa;margin-top:6px;">PRE: 착수전 &lt;10 · 실측 10~20 · 서포트 20~30 · 설치 30~100 / FINAL: 실측 ~20 · 서포트 20~30 · 설치 30~80 · 품질 80~90 · 턴온 90~100 · FINAL 보고가 시작된 공종은 FINAL 값, 아니면 PRE 값 · 비율은 줄별</div>';
   h += '</div>';
   el.innerHTML = h;
 }
@@ -5485,28 +5499,32 @@ function computeTAT() {
 //  - 지금: 공종 × PRE/FINAL별로 보고된 원래 값(누적 최대)이 단계 하한(10/20/30/80/90/100%)을 처음 넘은 날을 진입일로 보고,
 //    다음 단계 진입일까지의 일수를 그 단계 소요일로 센다.
 //  - 진입일을 모르는 경우는 제외: 첫 보고에서 이미 그 단계 이상(실측은 관측 시작일 이후 첫 보고면 인정), 한 번의 보고로 단계를 건너뜀.
-const TAT_STAGE_SEQ = ['실측','서포트','설치','품질','턴온'];
-const TAT_STAGE_LO = [0.10, 0.20, 0.30, 0.80, 0.90, 1.00];   // 마지막 = 100% 도달(턴온 종료)
+//  - PRE는 실측 → 서포트 → 설치(30~100%)까지만, 품질·턴온은 FINAL에만 있다.
+const TAT_STAGES = {
+  PRE:   { seq: ['실측','서포트','설치'],             lo: [0.10, 0.20, 0.30, 1.00] },               // 마지막 = 100% 도달(단계 종료)
+  FINAL: { seq: ['실측','서포트','설치','품질','턴온'], lo: [0.10, 0.20, 0.30, 0.80, 0.90, 1.00] }
+};
 function tatStageDurs(rs, cats) {
   const out = { PRE:{}, FINAL:{} };
-  for (const ph of STAGE_PHASES) for (const s of TAT_STAGE_SEQ) out[ph][s] = [];
+  for (const ph of STAGE_PHASES) for (const s of TAT_STAGES[ph].seq) out[ph][s] = [];
   for (const c of cats) for (const ph of STAGE_PHASES) {
+    const { seq, lo: los } = TAT_STAGES[ph];
     const cr = rs.filter(r => r.c === c && (ph === 'FINAL' ? r.ph === 'FINAL' : r.ph !== 'FINAL'));
     if (!cr.length) continue;
     const ent = [], before = [];   // 단계별 진입일, 진입 직전 보고일
     let mx = 0, lastD = null;
     for (const r of cr) {
-      for (let i = 0; i < TAT_STAGE_LO.length; i++) {
-        const lo = TAT_STAGE_LO[i] - TAT_EPS;
+      for (let i = 0; i < los.length; i++) {
+        const lo = los[i] - TAT_EPS;
         if (ent[i] == null && r.p >= lo && mx < lo) { ent[i] = r.d; before[i] = lastD; }
       }
       if (r.p > mx) mx = r.p;
       lastD = r.d;
     }
-    for (let i = 0; i < TAT_STAGE_SEQ.length; i++) {
+    for (let i = 0; i < seq.length; i++) {
       if (ent[i] == null || ent[i+1] == null || ent[i] === ent[i+1]) continue;
       if (before[i] == null && !(i === 0 && _tatObsStart && cr[0].d > _tatObsStart)) continue;
-      out[ph][TAT_STAGE_SEQ[i]].push(_ddG(ent[i], ent[i+1]));
+      out[ph][seq[i]].push(_ddG(ent[i], ent[i+1]));
     }
   }
   return out;
@@ -5515,15 +5533,15 @@ function tatStageDurs(rs, cats) {
 //  (공정 단계 소요일은 단계 진입일을 직접 관측한 구간만 쓰므로 불완전 설비도 포함)
 function tatAgg(eqs) {
   const cellsByCat = {}, stageDurs = { PRE:{}, FINAL:{} };
-  for (const ph of STAGE_PHASES) for (const s of TAT_STAGE_SEQ) stageDurs[ph][s] = [];
+  for (const ph of STAGE_PHASES) for (const s of TAT_STAGES[ph].seq) stageDurs[ph][s] = [];
   for (const e of eqs) {
-    if (e.stageDur) for (const ph of STAGE_PHASES) for (const s of TAT_STAGE_SEQ) stageDurs[ph][s].push(...e.stageDur[ph][s]);
+    if (e.stageDur) for (const ph of STAGE_PHASES) for (const s of TAT_STAGES[ph].seq) stageDurs[ph][s].push(...e.stageDur[ph][s]);
     if (e.censored) continue;
     for (const c of e.cells) if (c.done && c.tat != null) (cellsByCat[c.c] = cellsByCat[c.c] || []).push(c.tat);
   }
   const byCat = Object.entries(cellsByCat).map(([c,arr]) => ({ cat:c, n:arr.length, avg: arr.reduce((s,x)=>s+x,0)/arr.length })).sort((a,b) => b.avg - a.avg);
   const stageAvg = {};
-  for (const ph of STAGE_PHASES) stageAvg[ph] = TAT_STAGE_SEQ.map(s => {
+  for (const ph of STAGE_PHASES) stageAvg[ph] = TAT_STAGES[ph].seq.map(s => {
     const a = stageDurs[ph][s].slice().sort((x,y) => x-y);
     return { stage:s, n:a.length, avg: a.length ? a.reduce((x,y)=>x+y,0)/a.length : 0, med: a.length ? a[a.length >> 1] : 0 };
   });
@@ -5807,7 +5825,7 @@ function renderTATSection() {
     h += '<span style="color:#333;font-weight:600;">합계 '+Math.round(totAvg)+'일</span></div>';
   }
   if (!anyStage) h += '<div style="font-size:11px;color:#bbb;margin-bottom:12px;">단계 통과 데이터 없음</div>';
-  else h += '<div style="font-size:10px;color:#aaa;margin:-2px 0 12px 48px;">※ 단계 진입 = 그 공종의 PRE(또는 FINAL) 보고값이 단계 하한(10·20·30·80·90%)을 처음 넘은 날, 턴온 종료 = 100% 도달. 첫 보고에서 이미 넘었거나 한 번에 건너뛴 단계는 날짜를 알 수 없어 제외.</div>';
+  else h += '<div style="font-size:10px;color:#aaa;margin:-2px 0 12px 48px;">※ 단계 진입 = 그 공종의 PRE(또는 FINAL) 보고값이 단계 하한(10·20·30·80·90%)을 처음 넘은 날, 마지막 단계 종료 = 100% 도달. PRE는 설치(30~100%)까지, 품질·턴온은 FINAL에만 있음. 첫 보고에서 이미 넘었거나 한 번에 건너뛴 단계는 날짜를 알 수 없어 제외.</div>';
 
   // 공종별 평균 TAT
   h += '<div style="font-size:12px;font-weight:700;color:#555;margin:6px 0 5px;">공종별 평균 TAT <span style="font-weight:400;color:#aaa;">(80% 도달 완료 셀 기준)</span></div>';
@@ -5886,6 +5904,232 @@ function renderKPI(data) {
   document.getElementById('kpiWorker').innerHTML    = fmtInt(workerCount) + '<span class="kpi-unit">명</span>';
   try { renderStageSection(data); } catch (e) { console.error('stage', e); }
   try { renderTATSection(); } catch (e) { console.error('tat', e); }
+  try { renderSLSection(); } catch (e) { console.error('sl', e); }
+}
+
+// ── [2026-10-30] SL1+ / SL2 일정 (계획 대비) ─────────────────────────────
+//  - 일정 원본: 이메일로 받는 BBTech America Daily Report 엑셀 → 설비별 일정\일정_가져오기.cmd 가 sl-schedule.js 생성 → 배포에 포함
+//  - SL1+ = Bulk(Gas·PCW) + Foreline(진공) 설치 완료, SL2 = 해당 세부공종 전체 설치 완료
+//  - 완료 판정은 엑셀 세부공종 진척(PRE+FINAL) 100% 기준, 옆에 시트 진척(FINAL)을 같이 보여 차이 나는 설비를 표시
+const SL_SCOPES = ['Bulk', 'Foreline', 'S.GAS', 'UPW/Drain', 'Chemical', 'Exhaust', '2nd Tray', '2nd Cable', '3rd Tray', '3rd Cable'];
+const SL_SCOPE_SHORT = { 'Bulk':'Bulk', 'Foreline':'진공', 'S.GAS':'S-GAS', 'UPW/Drain':'UPW', 'Chemical':'Chem', 'Exhaust':'EXH', '2nd Tray':'2T', '2nd Cable':'2C', '3rd Tray':'3T', '3rd Cable':'3C' };
+const SL_SHEET_CAT = { 'Bulk':'Bulk', 'Foreline':'VACUUM', 'S.GAS':'S-GAS', 'UPW/Drain':'UPW', 'Chemical':'CHEMICAL', 'Exhaust':'Exhaust' };
+const SL_MS = { SL1p: { label:'SL1+', key:'sl1p', done:'d1', scopes:['Bulk','Foreline'], color:'#1f6f8b' },
+                SL2:  { label:'SL2',  key:'sl2',  done:'d2', scopes:null, color:'#6f42c1' } };
+const SL_ST = { '완료':'#2E7D32', '지연':'#c0392b', '임박':'#e67e22', '진행중':'#4e8ef7', '미정':'#9ca3af' };
+const SL_SOON = 7;   // 임박 = 계획일까지 7일 이내
+let _slMs = 'SL1p', _slFilter = '', _slQuery = '', _slDiffOnly = false, _slSheetCache = { n: -1, m: null };
+
+function loadSlSchedule() {
+  const s = document.createElement('script');
+  s.src = 'sl-schedule.js?_bb=' + Date.now();
+  s.onload = () => { try { renderSLSection(); } catch (e) { console.error('sl', e); } };
+  s.onerror = () => console.warn('sl-schedule.js 없음 — SL 일정 섹션 생략');
+  document.head.appendChild(s);
+}
+window.addEventListener('load', loadSlSchedule);
+
+// 시트 진척: 설비 → 엑셀 세부공종 → { pre, fin, finDone(FINAL 100% 첫 보고일), last(마지막 보고일) }
+function slSheetMap() {
+  const recs = Array.isArray(_stored) ? _stored : [];
+  if (_slSheetCache.n === recs.length && _slSheetCache.m) return _slSheetCache.m;
+  const m = new Map();
+  for (const r of recs) {
+    if (!isValidEquip(r.e) || typeof r.p !== 'number') continue;
+    const base = normalizeCategory(r.c); if (!base) continue;
+    const sc = base === 'BULK' ? (r.cf && /EXH/i.test(String(r.cf)) ? 'Exhaust' : 'Bulk') : base;
+    const e = String(r.e).toUpperCase();
+    if (!m.has(e)) m.set(e, {});
+    const o = (m.get(e)[sc] = m.get(e)[sc] || { pre: 0, fin: 0, finDone: null, last: '' });
+    if (r.ph === 'FINAL') { if (r.p > o.fin) o.fin = r.p; if (r.p >= 0.999 && (!o.finDone || r.d < o.finDone)) o.finDone = r.d; }
+    else if (r.p > o.pre) o.pre = r.p;
+    if (r.d > o.last) o.last = r.d;
+  }
+  _slSheetCache = { n: recs.length, m };
+  return m;
+}
+
+// 설비 1대의 마일스톤 상태
+function slEval(t, ms, today, sheet) {
+  const M = SL_MS[ms];
+  const scopes = (M.scopes || SL_SCOPES).filter(k => t.p[k] != null);
+  const plan = t[M.key] || '';
+  const hasPlan = /^\d{4}-\d{2}-\d{2}$/.test(plan);
+  const sh = sheet.get(t.t) || null;
+  const items = scopes.map(k => {
+    const o = sh && SL_SHEET_CAT[k] ? sh[SL_SHEET_CAT[k]] : null;
+    return { k, xl: t.p[k], sh: o, diff: t.p[k] >= 0.999 && !(o && o.fin >= 0.999) };
+  });
+  const done = scopes.length > 0 && items.every(i => i.xl >= 0.999);
+  const dday = hasPlan ? _ddG(today, plan) : null;
+  const st = !scopes.length ? null : done ? '완료' : !hasPlan ? '미정' : dday < 0 ? '지연' : dday <= SL_SOON ? '임박' : '진행중';
+  // 완료일: 엑셀에서 완료로 바뀐 보고일. 첫 파일부터 완료였으면 시트 FINAL 100% 보고일(없으면 마지막 보고일)로 추정
+  let doneDate = null, doneEst = false;
+  if (done) {
+    const d = t[M.done];
+    if (/^\d{4}-\d{2}-\d{2}$/.test(d || '')) doneDate = d;
+    else {
+      doneEst = true;
+      const ds = items.map(i => i.sh ? (i.sh.finDone || i.sh.last) : null);
+      doneDate = ds.every(Boolean) ? ds.sort().at(-1) : null;
+    }
+  }
+  return { st, plan, hasPlan, dday, items, done, doneDate, doneEst, diff: items.some(i => i.diff), noSheet: !sh };
+}
+
+function setSlMs(ms) { _slMs = ms; _slFilter = ''; renderSLSection(); }
+function setSlFilter(ms, f) { _slFilter = (_slFilter === f && ms === _slMs) ? '' : f; _slMs = ms; renderSLSection(); }
+function setSlQuery(q) { _slQuery = q; renderSLSection(true); }
+function setSlDiffOnly(b) { _slDiffOnly = b; renderSLSection(); }
+
+function renderSLSection(tableOnly) {
+  const el = document.getElementById('slSection'); if (!el) return;
+  const S = window.BB_SL_SCHEDULE;
+  if (!S || !Array.isArray(S.tools) || !S.tools.length) { el.innerHTML = ''; return; }
+  const esc = (s) => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const today = cstToday(), sheet = slSheetMap();
+  const rows = S.tools.map(t => ({ t, ev: { SL1p: slEval(t, 'SL1p', today, sheet), SL2: slEval(t, 'SL2', today, sheet) } }));
+  const M = SL_MS[_slMs];
+  const pctTxt = v => v == null ? '' : Math.round(v * 100) + '%';
+  const ddTxt = d => d == null ? '' : d < 0 ? (-d) + '일 지연' : d === 0 ? 'D-day' : 'D-' + d;
+
+  // 설비별 일정표 (검색 입력 중에는 표만 다시 그림)
+  const tableHtml = () => {
+    const q = _slQuery.trim().toUpperCase();
+    let list = rows.filter(r => r.ev[_slMs].st);
+    if (_slFilter) list = list.filter(r => r.ev[_slMs].st === _slFilter);
+    if (_slDiffOnly) list = list.filter(r => r.ev[_slMs].diff);
+    if (q) list = list.filter(r => (r.t.t + ' ' + (r.t.pm||'') + ' ' + (r.t.prc||'')).toUpperCase().includes(q));
+    list.sort((a, b) => { const x = a.ev[_slMs], y = b.ev[_slMs]; return (x.hasPlan ? x.plan : '9') < (y.hasPlan ? y.plan : '9') ? -1 : (x.hasPlan ? x.plan : '9') > (y.hasPlan ? y.plan : '9') ? 1 : (a.t.t < b.t.t ? -1 : 1); });
+    const scopes = SL_SCOPES.filter(k => S.tools.some(t => t.p[k] != null));
+    const th = 'padding:5px 6px;font-size:10px;color:#666;white-space:nowrap;position:sticky;top:0;background:#fafafa;';
+    let h = '<div style="font-size:10px;color:#888;margin:2px 0 4px;">' + list.length + '대 · 칸 = 엑셀 진척, 아래 작은 글씨 = 시트 FINAL(PRE) · <span style="color:#c0392b;">빨강</span> = 엑셀 100%인데 시트 FINAL 미완료</div>';
+    h += '<div style="max-height:420px;overflow:auto;border:1px solid #f0f0f0;border-radius:6px;"><table style="width:100%;border-collapse:collapse;min-width:820px;"><thead><tr>'
+      + '<th style="'+th+'text-align:left;">설비</th><th style="'+th+'text-align:left;">PRC · PM</th>'
+      + '<th style="'+th+'">SL1+ 계획</th><th style="'+th+'">SL1+</th><th style="'+th+'">SL2 계획</th><th style="'+th+'">SL2</th>';
+    for (const k of scopes) h += '<th style="'+th+'">' + esc(SL_SCOPE_SHORT[k] || k) + (SL_MS.SL1p.scopes.includes(k) ? '<sup style="color:#1f6f8b;">1+</sup>' : '') + '</th>';
+    h += '</tr></thead><tbody>';
+    const stCell = ev => {
+      if (!ev.st) return '<td style="padding:3px 6px;font-size:10px;color:#ccc;text-align:center;">-</td>';
+      const c = SL_ST[ev.st];
+      const sub = ev.st === '완료' ? (ev.doneDate ? (ev.doneEst ? '~' : '') + ev.doneDate.slice(5) : '') : ev.st === '미정' ? '' : ddTxt(ev.dday);
+      return '<td style="padding:3px 6px;text-align:center;white-space:nowrap;"><span style="font-size:10px;font-weight:700;color:#fff;background:'+c+';border-radius:8px;padding:1px 7px;">'+ev.st+'</span>'
+        + (sub ? '<div style="font-size:9px;color:#888;">'+sub+'</div>' : '') + (ev.diff ? '<div style="font-size:9px;color:#c0392b;">시트 차이</div>' : '') + '</td>';
+    };
+    for (const r of list.slice(0, 400)) {
+      const t = r.t, e1 = r.ev.SL1p, e2 = r.ev.SL2;
+      const sh = sheet.get(t.t) || null;
+      h += '<tr style="border-bottom:1px solid #f5f5f5;"><td style="padding:3px 6px;font-size:11px;font-weight:700;white-space:nowrap;">'+esc(t.t)+(r.ev.SL1p.noSheet ? ' <span title="시트에 진척 보고 없음" style="font-size:9px;color:#aaa;font-weight:400;">시트없음</span>' : '')+'</td>'
+        + '<td style="padding:3px 6px;font-size:10px;color:#777;white-space:nowrap;">'+esc(t.prc)+' · '+esc(t.pm)+'</td>'
+        + '<td style="padding:3px 6px;font-size:10px;text-align:center;white-space:nowrap;">'+esc(t.sl1p ? (e1.hasPlan ? t.sl1p.slice(2) : t.sl1p) : '')+'</td>' + stCell(e1)
+        + '<td style="padding:3px 6px;font-size:10px;text-align:center;white-space:nowrap;">'+esc(t.sl2 ? (e2.hasPlan ? t.sl2.slice(2) : t.sl2) : '')+'</td>' + stCell(e2);
+      for (const k of scopes) {
+        const v = t.p[k];
+        if (v == null) { h += '<td style="padding:3px 6px;text-align:center;color:#ddd;font-size:10px;">·</td>'; continue; }
+        const o = sh && SL_SHEET_CAT[k] ? sh[SL_SHEET_CAT[k]] : null;
+        const diff = v >= 0.999 && !(o && o.fin >= 0.999);
+        const bg = v >= 0.999 ? '#e8f5e9' : v > 0 ? '#fff8e1' : '#fafafa';
+        h += '<td style="padding:3px 6px;text-align:center;background:'+bg+';white-space:nowrap;"><div style="font-size:11px;font-weight:600;">'+Math.round(v*100)+'</div>'
+          + '<div style="font-size:9px;color:'+(diff ? '#c0392b' : '#999')+';">'+(o ? 'F'+Math.round(o.fin*100)+(o.pre ? ' P'+Math.round(o.pre*100) : '') : '시트 -')+'</div></td>';
+      }
+      h += '</tr>';
+    }
+    h += '</tbody></table></div>';
+    if (list.length > 400) h += '<div style="font-size:10px;color:#aaa;">… 상위 400대만 표시 — 검색으로 좁혀 주세요</div>';
+    return h;
+  };
+  if (tableOnly === true) { const tb = document.getElementById('slTable'); if (tb) { tb.innerHTML = tableHtml(); return; } }
+
+  let h = '<div style="border:1px solid #e5e7eb;border-radius:10px;padding:12px 14px;background:#fff;">';
+  h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;"><span style="font-size:13px;font-weight:800;color:#222;">📅 SL1+ / SL2 일정 (계획 대비)</span>'
+    + '<span style="font-size:11px;color:#888;">Daily Report '+esc(S.reportDate)+' 기준'+(S.workDate ? ' (작업일 '+esc(S.workDate)+')' : '')+' · 설비 '+S.tools.length+'대 · 오늘 '+today+'</span>'
+    + '<span style="flex:1;"></span>'
+    + '<span style="font-size:10px;color:#999;">SL1+ = Bulk Gas·PCW + 진공 설치 완료 · SL2 = 전체 설치 완료</span></div>';
+
+  // 요약 카드 (SL1+ / SL2)
+  h += '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px;">';
+  for (const ms of ['SL1p', 'SL2']) {
+    const cnt = {}; let diffN = 0, tot = 0;
+    for (const r of rows) { const ev = r.ev[ms]; if (!ev.st) continue; tot++; cnt[ev.st] = (cnt[ev.st] || 0) + 1; if (ev.diff) diffN++; }
+    const sel = _slMs === ms;
+    h += '<div style="flex:1 1 300px;border:2px solid '+(sel ? SL_MS[ms].color : '#eee')+';border-radius:8px;padding:8px 10px;">'
+      + '<div onclick="setSlMs(\''+ms+'\')" style="cursor:pointer;display:flex;align-items:baseline;gap:6px;margin-bottom:6px;"><span style="font-size:13px;font-weight:800;color:'+SL_MS[ms].color+';">'+SL_MS[ms].label+'</span>'
+      + '<span style="font-size:11px;color:#666;">완료 <b>'+(cnt['완료']||0)+'</b> / '+tot+'대 ('+(tot ? Math.round((cnt['완료']||0)/tot*100) : 0)+'%)</span>'
+      + (diffN ? '<span title="엑셀은 완료인데 시트 FINAL이 100% 미만인 설비" style="font-size:10px;color:#c0392b;">시트 차이 '+diffN+'대</span>' : '') + '</div>'
+      + '<div style="display:flex;gap:4px;">';
+    for (const k of ['완료', '진행중', '임박', '지연', '미정']) {
+      const n = cnt[k] || 0, on = sel && _slFilter === k;
+      h += '<div onclick="setSlFilter(\''+ms+'\',\''+k+'\')" title="'+(k==='임박' ? '계획일까지 '+SL_SOON+'일 이내' : k==='미정' ? '계획일이 날짜가 아님(예: EUV 별도일정)' : k)+' — 클릭하면 아래 표 필터" style="flex:1;min-width:0;cursor:pointer;text-align:center;border-radius:6px;padding:5px 2px;background:'+(n ? SL_ST[k] : SL_ST[k]+'44')+';color:#fff;'+(on ? 'outline:3px solid #222;' : '')+'">'
+        + '<div style="font-size:10px;">'+k+'</div><div style="font-size:17px;font-weight:800;line-height:1.1;">'+n+'</div></div>';
+    }
+    h += '</div></div>';
+  }
+  h += '</div>';
+
+  // 계획 대비 누적 추이 + 지연·임박 목록
+  h += '<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px;">'
+    + '<div style="flex:1 1 420px;min-width:0;"><div style="font-size:12px;font-weight:700;color:#555;margin-bottom:4px;">'+M.label+' 계획 대비 누적 완료 (주별)</div>'
+    + '<div style="position:relative;height:230px;"><canvas id="slCurveCanvas"></canvas></div>'
+    + '<div style="font-size:10px;color:#aaa;margin-top:2px;">실적 완료일 = 엑셀에서 완료로 바뀐 보고일. 첫 Daily Report부터 이미 완료였던 설비는 시트 FINAL 100% 보고일(없으면 마지막 보고일)로 추정</div></div>';
+  const alert = rows.filter(r => r.ev[_slMs].st === '지연' || r.ev[_slMs].st === '임박').sort((a, b) => a.ev[_slMs].dday - b.ev[_slMs].dday);
+  h += '<div style="flex:1 1 340px;min-width:0;"><div style="font-size:12px;font-weight:700;color:#555;margin-bottom:4px;">'+M.label+' 지연 · 임박 설비 <span style="font-weight:400;color:#aaa;">('+alert.length+'대 · '+SL_SOON+'일 이내)</span></div>'
+    + '<div style="max-height:250px;overflow:auto;">';
+  if (!alert.length) h += '<div style="font-size:11px;color:#bbb;padding:8px 0;">지연·임박 설비 없음</div>';
+  for (const r of alert) {
+    const ev = r.ev[_slMs];
+    const left = ev.items.filter(i => i.xl < 0.999).map(i => esc(SL_SCOPE_SHORT[i.k] || i.k) + ' ' + pctTxt(i.xl) + (i.sh ? ' <span style="color:#999;">(시트 F' + Math.round(i.sh.fin * 100) + ')</span>' : '')).join(', ');
+    h += '<div style="display:flex;gap:6px;align-items:center;padding:4px 0;border-bottom:1px solid #f5f5f5;font-size:11px;">'
+      + '<span style="flex:0 0 auto;font-size:10px;font-weight:700;color:#fff;background:'+SL_ST[ev.st]+';border-radius:8px;padding:1px 7px;">'+ddTxt(ev.dday)+'</span>'
+      + '<span style="flex:0 0 78px;font-weight:700;">'+esc(r.t.t)+'</span>'
+      + '<span style="flex:0 0 60px;color:#777;">'+ev.plan.slice(5)+'</span>'
+      + '<span style="flex:1;min-width:0;color:#555;">'+left+'</span></div>';
+  }
+  h += '</div></div></div>';
+
+  // 표 머리 (마일스톤 · 상태 필터 · 검색)
+  h += '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:4px 0;"><span style="font-size:12px;font-weight:700;color:#555;">설비별 일정표</span>';
+  for (const ms of ['SL1p', 'SL2']) h += '<button onclick="setSlMs(\''+ms+'\')" style="padding:2px 10px;font-size:11px;border:none;border-radius:10px;cursor:pointer;background:'+(_slMs===ms ? SL_MS[ms].color+';color:#fff' : '#eee;color:#555')+';">'+SL_MS[ms].label+' 기준</button>';
+  if (_slFilter) h += '<span onclick="setSlFilter(\''+_slMs+'\',\''+_slFilter+'\')" style="cursor:pointer;font-size:11px;background:'+SL_ST[_slFilter]+';color:#fff;border-radius:10px;padding:2px 8px;">'+_slFilter+' ✕</span>';
+  h += '<label style="font-size:11px;color:#666;cursor:pointer;"><input type="checkbox" '+(_slDiffOnly ? 'checked' : '')+' onchange="setSlDiffOnly(this.checked)" style="vertical-align:middle;"> 시트 차이만</label>'
+    + '<span style="flex:1;"></span><input type="search" placeholder="설비 · PM 검색" value="'+esc(_slQuery)+'" oninput="setSlQuery(this.value)" style="font-size:11px;padding:3px 6px;border:1px solid #ccc;border-radius:4px;width:150px;"></div>';
+  h += '<div id="slTable">' + tableHtml() + '</div>';
+  h += '</div>';
+  el.innerHTML = h;
+  drawSlCurve(rows, today);
+}
+
+function drawSlCurve(rows, today) {
+  const c = document.getElementById('slCurveCanvas'); if (!c || typeof Chart === 'undefined') return;
+  const M = SL_MS[_slMs];
+  const evs = rows.map(r => r.ev[_slMs]).filter(e => e.st);
+  const plans = evs.filter(e => e.hasPlan).map(e => e.plan).sort();
+  if (!plans.length) return;
+  const ymd = x => x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0');   // 로컬 날짜 (toISOString은 UTC라 하루 밀림)
+  const monday = d => { const x = new Date(d + 'T00:00:00'); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return ymd(x); };
+  const addD = (d, n) => { const x = new Date(d + 'T00:00:00'); x.setDate(x.getDate() + n); return ymd(x); };
+  const doneDates = evs.filter(e => e.done).map(e => e.doneDate || today).sort();
+  let wk = monday([plans[0], doneDates[0] || plans[0]].sort()[0]);
+  const lastWk = monday([plans.at(-1), today].sort().at(-1));
+  const labels = [], plan = [], act = [];
+  for (let i = 0; wk <= lastWk && i < 200; i++, wk = addD(wk, 7)) {
+    const end = addD(wk, 6);
+    labels.push(wk.slice(2));
+    plan.push(plans.filter(d => d <= end).length);
+    act.push(wk <= today ? doneDates.filter(d => d <= end).length : null);
+  }
+  const todayIdx = labels.indexOf(monday(today).slice(2));
+  if (charts['slCurveCanvas']) charts['slCurveCanvas'].destroy();
+  charts['slCurveCanvas'] = new Chart(c.getContext('2d'), {
+    type: 'line',
+    data: { labels, datasets: [
+      { label: M.label + ' 계획 누적', data: plan, borderColor: '#9ca3af', backgroundColor: '#9ca3af22', borderDash: [5, 4], pointRadius: 0, tension: 0.2, fill: true },
+      { label: M.label + ' 실적 누적', data: act, borderColor: M.color, backgroundColor: M.color, pointRadius: 2, tension: 0.2, spanGaps: false }
+    ] },
+    options: { responsive: true, maintainAspectRatio: false, animation: false, interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { labels: { boxWidth: 12, font: { size: 11 } } },
+        tooltip: { callbacks: { title: it => it[0].label + ' 주' + (it[0].dataIndex === todayIdx ? ' (이번 주)' : ''), footer: it => { const p = plan[it[0].dataIndex], a = act[it[0].dataIndex]; return a == null ? '' : '차이 ' + (a - p >= 0 ? '+' : '') + (a - p) + '대'; } } } },
+      scales: { y: { beginAtZero: true, ticks: { font: { size: 10 } } }, x: { ticks: { font: { size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 14 } } } }
+  });
 }
 
 // ── 층별 탭 상태 ────────────────────────────────────────────────────
