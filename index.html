@@ -23,7 +23,7 @@ if (location.protocol === 'file:') {
 }
 </script>
 <script>
-window.BBTECH_BUILD = '2026-10-17.5';
+window.BBTECH_BUILD = '2026-10-30.1';
 if (typeof window.Chart === 'undefined') {
   window.Chart = class ChartFallback {
     constructor(ctx, config) {
@@ -787,9 +787,33 @@ function renormalizeManDays(recs) {
   }
 }
 
+// ── [2026-10-30] 작업일 이상값 판정 ─────────────────────────────────
+// 연도 오타(2016·2025·2027·2926·0202 등)와 제출 전에 미리 입력한 미래 날짜를 걸러낸다.
+// 유효 범위: DATE_MIN 이후 & 제출일(타임스탬프) DATE_BACKFILL_MAX일 전 ~ 제출일+1일(시차 허용).
+// 타임스탬프가 없으면 DATE_MIN ~ 오늘+1일.
+const DATE_MIN = '2026-01-01';
+const DATE_BACKFILL_MAX = 120;
+function _isDateOutlier(d, ts) {
+  if (!d || d < DATE_MIN) return true;
+  let tsDate = null;
+  if (ts != null && ts !== '') {
+    tsDate = _excelDate((ts instanceof Date || typeof ts === 'number') ? ts : String(ts).replace(/_eq\d+$/, ''));
+  }
+  const ref = (tsDate && tsDate >= DATE_MIN) ? tsDate : cstToday();
+  if (d > addDaysStr(ref, 1)) return true;
+  if (tsDate && tsDate >= DATE_MIN && d < addDaysStr(tsDate, -DATE_BACKFILL_MAX)) return true;
+  return false;
+}
+
 // ── 최초 로드: localStorage 없으면 시드 저장 ─────────────────────────
 let _stored = lsLoad();
 if (!_stored) { _stored = __SEED__; }
+// 이전 버전이 저장해 둔 데이터에도 같은 날짜 기준을 적용한다.
+if (Array.isArray(_stored)) {
+  const _before = _stored.length;
+  _stored = _stored.filter(r => r && !_isDateOutlier(r.d, r._ts));
+  if (_stored.length !== _before) { try { lsSave(_stored); } catch(e) {} }
+}
 
 // ── 기존 저장 데이터 업체명 재정규화 (원본 vf 기준, 사외 분리 등 최신 규칙 반영) ──
 if (Array.isArray(_stored)) {
@@ -918,7 +942,7 @@ function _parseEquips(raw) {
 // [2026-08-15] stats 인자를 넘기면 제외 사유별 건수를 함께 집계한다(계산 로직 불변).
 function rowsToRecords(rows, stats) {
   stats = stats || {};
-  stats.dataRows = 0; stats.blank = 0; stats.noDate = 0;
+  stats.dataRows = 0; stats.blank = 0; stats.noDate = 0; stats.badDate = 0; stats.badDateList = [];
   stats.headerMissing = 0; stats.accepted = 0;
   if (!rows || rows.length < 2) { stats.headerMissing = rows ? Math.max(0, rows.length - 1) : 0; return []; }
   const H = {};
@@ -938,6 +962,12 @@ function rowsToRecords(rows, stats) {
     const ts  = r[H['타임스탬프']];
     const d   = _excelDate(r[H['작업일']]);
     if (!d) { stats.noDate++; continue; }
+    if (_isDateOutlier(d, ts)) {
+      stats.badDate++;
+      stats.badDateList.push({ d, ts: ts == null ? '' : String(ts).trim(),
+        e: String(r[H['설비명']] || '').trim(), w: String(r[H['성함']] || '').trim() });
+      continue;
+    }
     stats.accepted++;
     const vRaw = String(r[H['소속']]||'').trim();
     const cRaw = String(r[H['공종']]||'').trim();
@@ -1038,7 +1068,7 @@ function csvTextToRecords(text) {
 }
 // [2026-08-15] 원본 행 수·제외 사유를 함께 돌려주는 진단용 파서
 function csvTextToRecordsDiag(text) {
-  const out = { records:[], rawRows:0, dataRows:0, blank:0, noDate:0,
+  const out = { records:[], rawRows:0, dataRows:0, blank:0, noDate:0, badDate:0, badDateList:[],
                 headerMissing:0, accepted:0, parseError:null };
   let rows = null;
   try {
@@ -1059,6 +1089,8 @@ function csvTextToRecordsDiag(text) {
   out.dataRows = stats.dataRows || 0;
   out.blank = stats.blank || 0;
   out.noDate = stats.noDate || 0;
+  out.badDate = stats.badDate || 0;
+  out.badDateList = stats.badDateList || [];
   out.headerMissing = stats.headerMissing || 0;
   out.accepted = stats.accepted || 0;
   return out;
@@ -1740,11 +1772,11 @@ function mostCommonMapKey(m, fallback) {
   return best;
 }
 
-function computeEffData() {
+function computeEffData(range) {
   const recs = Array.isArray(_stored) ? _stored : [];
   const a = document.getElementById('dcDateA'), b = document.getElementById('dcDateB');
-  const pEnd = (b && b.value) ? b.value : cstToday();
-  const pStart = (a && a.value) ? a.value : pEnd;
+  const pEnd = (range && range.pEnd) || ((b && b.value) ? b.value : cstToday());
+  const pStart = (range && range.pStart) || ((a && a.value) ? a.value : pEnd);
   const baseDate = addDaysStr(pStart, -1);
   const catEl = document.getElementById('dcCat');
   const effCat = (catEl && catEl.value) ? catEl.value : 'ALL';
@@ -2089,13 +2121,19 @@ function drawEffChartsInline() {
       plugins:{ legend:{position:'bottom',labels:{boxWidth:10,font:{size:10}}}, tooltip:{ callbacks:{ label:(c)=>c.raw.label+' (설치공수 '+c.raw.x+', 검증 배분진척 '+c.raw.y+'%p)' } } },
       scales:{ x:{ title:{display:true,text:'설치공수 (M/D)'}, beginAtZero:true }, y:{ title:{display:true,text:'검증 배분진척 %p'}, beginAtZero:true } } } });
   // 5) 기간별 효율 추이 + 추세선
-  const tr = d.trend;
+  // [2026-10-30] 선택 기간이 짧으면(기본값 '오늘' 등) 점이 1~2개뿐이라 선이 안 보이므로 추이만 최근 14일로 넓힌다.
+  const TREND_MIN_DAYS = 14;
+  let tr = d.trend, trLabel = '일별 효율';
+  if (tr.length < TREND_MIN_DAYS) {
+    tr = computeEffData({ pStart: addDaysStr(d.pEnd, -(TREND_MIN_DAYS - 1)), pEnd: d.pEnd }).trend;
+    trLabel = '일별 효율 (최근 ' + TREND_MIN_DAYS + '일)';
+  }
   const ys = tr.map(t=>t.eff);
   // 선형회귀 추세선 (eff!=null 포인트 기준)
   const pts = tr.map((t,i)=>({i,y:t.eff})).filter(p=>p.y!=null);
   let trend=[]; if(pts.length>=2){ const n=pts.length; const sx=pts.reduce((s,p)=>s+p.i,0), sy=pts.reduce((s,p)=>s+p.y,0), sxx=pts.reduce((s,p)=>s+p.i*p.i,0), sxy=pts.reduce((s,p)=>s+p.i*p.y,0); const slope=(n*sxy-sx*sy)/(n*sxx-sx*sx||1); const inter=(sy-slope*sx)/n; trend=tr.map((t,i)=>Math.round((slope*i+inter)*10)/10); }
   mk('effTrendCanvas', { type:'line', data:{ labels: tr.map(t=>t.d.slice(5)), datasets:[
-      { label:'일별 효율', data: ys.map(y=>y==null?null:Math.round(y*10)/10), borderColor:'#2E7D32', backgroundColor:'#2E7D3222', spanGaps:true, tension:0.3 },
+      { label:trLabel, data: ys.map(y=>y==null?null:Math.round(y*10)/10), borderColor:'#2E7D32', backgroundColor:'#2E7D3222', spanGaps:true, tension:0.3 },
       ...(trend.length? [{ label:'추세선', data:trend, borderColor:'#dc3545', borderDash:[5,4], pointRadius:0, fill:false }]:[])
     ] },
     options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'bottom',labels:{boxWidth:10,font:{size:10}}}}, scales:{ y:{ beginAtZero:true, title:{display:true,text:'%p/공수'} } } } });
@@ -2313,6 +2351,12 @@ function effSectionHtml() {
 
 // ── 수정 이력 (최신순) ──────────────────────────────────────────────
 const REVISIONS = [
+  { date: '2026-10-30', items: [
+    '작업일 이상값 자동 제외 — 연도 오타(2016·2025·2027·2926·0202 등), 제출일보다 뒤의 미래 날짜, 제출일 120일 이전 날짜. 동기화 바 제외 내역에 "날짜이상" 건수 표시, 마우스를 올리면 제외된 행 목록 표시',
+    '기간별 효율 추이에 선이 안 보이던 문제 수정 — "전체" 기간이 오타 날짜(0202년)부터 잡히던 문제, 기간이 하루면 점이 1개뿐이던 문제(짧은 기간은 최근 14일 추이로 표시)',
+    '공정 단계 현황 판정 재정의 — PRE 70%·FINAL 30% 가중 합산값 대신 보고된 원래 진척으로 판정하고 PRE/FINAL 두 줄로 표시(10% 실측 시작이 7%로 계산돼 착수전에, PRE 85%가 59%로 계산돼 설치에 들어가던 문제). 공종이 여러 개인 설비는 공종 평균 대신 가장 늦은 공종 기준. 진척 보고 없이 용접사·지원·사외 보고에만 나온 설비는 착수전이 아닌 "진척 미보고"로 분리. 단계 목록에 공종별 PRE/FINAL 진척 표시',
+    'TAT 공정 단계별 평균 소요일 재정의 — 가중 합산 평균값 대신 공종별 PRE/FINAL 보고값이 단계 하한을 처음 넘은 날로 계산해 PRE·FINAL 두 줄로 표시. 이전에는 실측이 PRE 14~29%, 품질이 FINAL 33~67% 구간으로 잡혔고, 완료(80%) 시점에서 계산을 멈춰 턴온이 항상 0일이었음. 진입일을 알 수 없는 단계(첫 보고에서 이미 넘었거나 한 번에 건너뜀)는 제외, 중앙값 함께 표시'
+  ]},
   { date: '2026-10-17', items: [
     '자동 동기화 주기를 1분에서 15분으로 변경',
     '웹 배포 화면에서 자동 동기화 체크박스를 켜고 끌 수 있도록 변경 — 선택 상태는 브라우저별로 유지',
@@ -3641,7 +3685,7 @@ function renderDailyCompare(recs, dateA, dateB) {
 function bbNewDiag() {
   return { source:null, sourceLabel:'', okAt:null, rawRows:null, apiRows:null,
            dataRows:null, records:null, accepted:null, excluded:0,
-           excludedBlank:0, excludedNoDate:0, excludedHeader:0,
+           excludedBlank:0, excludedNoDate:0, excludedBadDate:0, badDateList:[], excludedHeader:0,
            expandedBy:0, parseError:null, error:null, errorCode:null, elapsedMs:null };
 }
 let _bbLastDiag = null;
@@ -3701,6 +3745,7 @@ function renderBbSyncBar(diag) {
       const parts = [];
       parts.push('제외 내역 — 빈행 ' + bbNum(diag.excludedBlank)
                  + ' · 날짜누락 ' + bbNum(diag.excludedNoDate)
+                 + ' · 날짜이상 ' + bbNum(diag.excludedBadDate)
                  + ' · 헤더불일치 ' + bbNum(diag.excludedHeader)
                  + ' · 파싱실패 ' + (diag.parseError ? '있음' : '0'));
       if (diag.expandedBy > 0) {
@@ -3716,6 +3761,12 @@ function renderBbSyncBar(diag) {
         parts.push('서버 집계 ' + bbNum(diag.apiRows) + '행');
       }
       detail.textContent = parts.join('  |  ');
+      const bad = diag.badDateList || [];
+      detail.title = bad.length
+        ? '날짜이상으로 제외된 행 (작업일 | 제출 타임스탬프 | 설비 | 성함)\n'
+          + bad.slice(0, 60).map(x => x.d + ' | ' + x.ts + ' | ' + x.e + ' | ' + x.w).join('\n')
+          + (bad.length > 60 ? '\n… 외 ' + (bad.length - 60) + '건' : '')
+        : '';
     }
   }
 }
@@ -4007,6 +4058,8 @@ async function fetchViaCsv(url, options) {
     diag.dataRows = parsed.dataRows;
     diag.excludedBlank = parsed.blank;
     diag.excludedNoDate = parsed.noDate;
+    diag.excludedBadDate = parsed.badDate;
+    diag.badDateList = parsed.badDateList;
     diag.excludedHeader = parsed.headerMissing;
     diag.parseError = parsed.parseError;
     if (parsed.parseError) throw new Error('CSV 파싱 실패: ' + parsed.parseError);
@@ -4014,7 +4067,7 @@ async function fetchViaCsv(url, options) {
     if (!incoming.length) throw new Error('레코드 0건 — 머리글(설비명/공종/성함/설치 진척률) 확인');
     const n = replaceFromSync(incoming);
     diag.records = n;
-    diag.excluded = diag.excludedBlank + diag.excludedNoDate + diag.excludedHeader;
+    diag.excluded = diag.excludedBlank + diag.excludedNoDate + diag.excludedBadDate + diag.excludedHeader;
     diag.expandedBy = n - parsed.accepted;
     diag.okAt = new Date();
     renderBbSyncBar(diag);
@@ -5247,23 +5300,50 @@ const STAGE_DEFS = [
   { key:'품질',   lo:0.80, hi:0.90, color:'#17a2b8', desc:'품질 (80~90%)' },
   { key:'턴온',   lo:0.90, hi:1.01, color:'#2E7D32', desc:'턴온 (90~100%)' },
 ];
+const STAGE_EPS = 1e-9;   // 소수 오차 보정 — 10%가 9.999…%로 계산돼 착수전에 들어가던 문제
 function stageOf(p) {
   if (typeof p !== 'number' || isNaN(p)) return null;
-  for (const s of STAGE_DEFS) if (p >= s.lo && p < s.hi) return s;
+  for (const s of STAGE_DEFS) if (p >= s.lo - STAGE_EPS && p < s.hi - STAGE_EPS) return s;
   return STAGE_DEFS[STAGE_DEFS.length-1];
 }
-let _stageData = {};   // key → [{eq, v, p}]
+// [2026-10-30] 공정 단계 판정 재정의
+//  - PRE와 FINAL은 각자 10→100% 척도로 보고되는 별도 단계 → 가중 합산값이 아니라 보고된 원래 값으로 판정하고 PRE/FINAL 줄을 나눈다.
+//  - 공종별 상태: FINAL 보고가 있으면 (FINAL, FINAL 최대값), 없으면 (PRE, PRE 최대값 · 미보고 공종은 0).
+//  - 설비 상태: 공종 중 가장 늦은 공종 (PRE가 FINAL보다 늦음 → 같은 단계면 진척이 낮은 쪽). 공종 목록은 설비 마스터 우선.
+//  - 진척 보고가 한 건도 없는 설비(용접사·공정 지원·사외 제작 보고에만 등장)는 '미보고'로 따로 센다.
+const STAGE_PHASES = ['PRE', 'FINAL'];
+function equipStageStatus(eq, cats) {
+  const master = getEquipMasterCategories(eq);
+  const list = (master && master.length) ? master : [...cats.keys()];
+  let worst = null;
+  const parts = [];
+  for (const c of list) {
+    const o = cats.get(c) || { pre: null, fin: null };
+    const st = o.fin != null ? { ph: 'FINAL', p: o.fin } : { ph: 'PRE', p: o.pre != null ? o.pre : 0 };
+    parts.push(c + ' ' + (st.ph === 'FINAL' ? 'F' : 'P') + Math.round(st.p * 100));
+    if (!worst || (st.ph === 'PRE' && worst.ph === 'FINAL') || (st.ph === worst.ph && st.p < worst.p)) worst = st;
+  }
+  if (!worst) return null;
+  return { ph: worst.ph, p: worst.p, detail: parts.join(' · ') };
+}
+let _stageData = {};   // 'PRE|설치' / 'FINAL|턴온' / '미보고' → [{eq, v, p, detail}]
 function openStageModal(key) {
-  const def = STAGE_DEFS.find(s => s.key === key); if (!def) return;
-  const list = (_stageData[key] || []).slice().sort((a,b) => b.p - a.p);
+  const [ph, sk] = key.split('|');
+  const def = STAGE_DEFS.find(s => s.key === sk);
+  if (key !== '미보고' && !def) return;
+  const color = def ? def.color : '#9ca3af';
+  const list = (_stageData[key] || []).slice().sort((a,b) => (b.p - a.p) || (a.eq < b.eq ? -1 : 1));
   const esc = (s) => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  document.getElementById('hmModalTitle').textContent = def.key + ' 단계 설비';
-  document.getElementById('hmModalSub').textContent = def.desc + ' · ' + list.length + '대';
+  document.getElementById('hmModalTitle').textContent = key === '미보고' ? '진척 미보고 설비' : (ph + ' · ' + sk + ' 단계 설비');
+  document.getElementById('hmModalSub').textContent = (key === '미보고'
+    ? '용접사·공정 지원·사외 제작 보고에만 등장하고 진척 보고는 없는 설비 (설비명 오기입 확인 필요)'
+    : def.desc + ' · 가장 늦은 공종 기준') + ' · ' + list.length + '대';
   let h = '';
   if (!list.length) h = '<div style="font-size:12px;color:#bbb;padding:10px 0;">해당 단계 설비 없음</div>';
   else {
-    h = '<table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#fafafa;"><th style="padding:5px 8px;font-size:11px;color:#666;text-align:left;">설비</th><th style="padding:5px 8px;font-size:11px;color:#666;text-align:left;">업체</th><th style="padding:5px 8px;font-size:11px;color:#666;text-align:right;">진척률</th></tr></thead><tbody>';
-    for (const it of list) h += '<tr style="border-bottom:1px solid #f7f7f7;"><td style="padding:4px 8px;font-size:12px;font-weight:600;">'+esc(it.eq)+'</td><td style="padding:4px 8px;font-size:11px;color:#777;">'+esc(it.v||'')+'</td><td style="padding:4px 8px;font-size:12px;text-align:right;font-weight:600;color:'+def.color+';">'+Math.round(it.p*100)+'%</td></tr>';
+    const th = 'padding:5px 8px;font-size:11px;color:#666;';
+    h = '<table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#fafafa;"><th style="'+th+'text-align:left;">설비</th><th style="'+th+'text-align:left;">업체</th><th style="'+th+'text-align:left;">공종별 (P=PRE · F=FINAL)</th><th style="'+th+'text-align:right;">'+(key === '미보고' ? '보고 건수' : '판정 진척')+'</th></tr></thead><tbody>';
+    for (const it of list) h += '<tr style="border-bottom:1px solid #f7f7f7;"><td style="padding:4px 8px;font-size:12px;font-weight:600;">'+esc(it.eq)+'</td><td style="padding:4px 8px;font-size:11px;color:#777;">'+esc(it.v||'')+'</td><td style="padding:4px 8px;font-size:11px;color:#555;">'+esc(it.detail||'')+'</td><td style="padding:4px 8px;font-size:12px;text-align:right;font-weight:600;color:'+color+';">'+(key === '미보고' ? it.n + '건' : Math.round(it.p*100)+'%')+'</td></tr>';
     h += '</tbody></table>';
   }
   document.getElementById('hmModalBody').innerHTML = h;
@@ -5272,33 +5352,52 @@ function openStageModal(key) {
 function renderStageSection(data) {
   const el = document.getElementById('stageSection'); if (!el) return;
   const valid = data.filter(r => isValidEquip(r.e));
-  const eqCMap = buildEquipCategoryMax(valid);
-  const eqs = uniq(valid, r => r.e);
-  _stageData = {}; STAGE_DEFS.forEach(s => _stageData[s.key] = []);
-  for (const eq of eqs) {
-    if (isTurnedOn(eq)) { const vr = valid.find(r => r.e === eq); _stageData['턴온'].push({ eq, v: vr ? (vr.v||'') : '', p: 1 }); continue; }
-    const p = getEquipAvgPWithMaster(eq, eqCMap.get(eq));
-    if (typeof p !== 'number' || isNaN(p)) continue;
-    const st = stageOf(p); if (!st) continue;
-    const vr = valid.find(r => r.e === eq);
-    _stageData[st.key].push({ eq, v: vr ? (vr.v||'') : '', p });
+  // 설비 → 공종 → { pre, fin } 보고 원래 값의 최대
+  const raw = new Map(), vendorOf = new Map(), recCount = new Map();
+  for (const r of valid) {
+    if (!vendorOf.has(r.e)) vendorOf.set(r.e, r.v || '');
+    recCount.set(r.e, (recCount.get(r.e) || 0) + 1);
+    if (!raw.has(r.e)) raw.set(r.e, new Map());
+    if (typeof r.p !== 'number') continue;
+    const c = normalizeCategory(r.c); if (!c) continue;
+    const cm = raw.get(r.e);
+    if (!cm.has(c)) cm.set(c, { pre: null, fin: null });
+    const o = cm.get(c), k = r.ph === 'FINAL' ? 'fin' : 'pre';
+    if (o[k] == null || r.p > o[k]) o[k] = r.p;
   }
-  const total = STAGE_DEFS.reduce((s,d) => s + _stageData[d.key].length, 0);
+  _stageData = { '미보고': [] };
+  STAGE_PHASES.forEach(ph => STAGE_DEFS.forEach(s => _stageData[ph + '|' + s.key] = []));
+  for (const [eq, cats] of raw) {
+    const v = vendorOf.get(eq) || '';
+    if (isTurnedOn(eq)) { _stageData['FINAL|턴온'].push({ eq, v, p: 1, detail: '턴온 확인 등록' }); continue; }
+    if (!cats.size) { _stageData['미보고'].push({ eq, v, p: 0, n: recCount.get(eq) || 0, detail: '' }); continue; }
+    const st = equipStageStatus(eq, cats); if (!st) continue;
+    // FINAL은 착수 자체가 이미 PRE 이후이므로 10% 미만도 실측 칸으로 본다
+    let sd = stageOf(st.p); if (st.ph === 'FINAL' && sd.key === '착수전') sd = STAGE_DEFS[1];
+    _stageData[st.ph + '|' + sd.key].push({ eq, v, p: st.p, detail: st.detail });
+  }
+  const rowTotal = ph => STAGE_DEFS.reduce((s, d) => s + _stageData[ph + '|' + d.key].length, 0);
+  const nNo = _stageData['미보고'].length;
+  const total = rowTotal('PRE') + rowTotal('FINAL') + nNo;
   let h = '<div style="border:1px solid #e5e7eb;border-radius:10px;padding:12px 14px;background:#fff;">'
     + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;"><span style="font-size:13px;font-weight:800;color:#222;">🏗️ 공정 단계 현황</span>'
-    + '<span style="font-size:11px;color:#888;">설비 ' + total + '대 · 현재 진척률 기준 · 단계 클릭 시 설비 목록</span></div>';
-  // 퍼널 바
-  h += '<div style="display:flex;gap:4px;align-items:stretch;">';
-  for (const d of STAGE_DEFS) {
-    const n = _stageData[d.key].length;
-    const wpct = total ? Math.max(6, Math.round(n/total*100)) : 16;
-    h += '<div onclick="openStageModal(\''+d.key+'\')" title="'+d.desc+'" style="flex:'+(n||0.4)+' 1 0;min-width:64px;cursor:pointer;background:'+d.color+(n?'':'55')+';border-radius:6px;padding:8px 6px;color:#fff;text-align:center;">'
-      + '<div style="font-size:11px;font-weight:600;opacity:.95;">'+d.key+'</div>'
-      + '<div style="font-size:19px;font-weight:800;line-height:1.1;">'+n+'<span style="font-size:11px;font-weight:500;">대</span></div>'
-      + '<div style="font-size:9px;opacity:.85;">'+(total?Math.round(n/total*100):0)+'%</div></div>';
+    + '<span style="font-size:11px;color:#888;">설비 ' + total + '대 · 보고된 진척 기준 · 공종이 여러 개면 가장 늦은 공종 · 단계 클릭 시 설비 목록</span>'
+    + '<span onclick="openStageModal(\'미보고\')" title="진척 보고 없이 용접사·공정 지원·사외 제작 보고에만 등장한 설비" style="margin-left:auto;cursor:pointer;font-size:11px;background:#f3f4f6;border:1px solid #d1d5db;border-radius:12px;padding:2px 10px;color:#555;">진척 미보고 <b>' + nNo + '</b>대 ›</span></div>';
+  for (const ph of STAGE_PHASES) {
+    const rt = rowTotal(ph);
+    const defs = ph === 'FINAL' ? STAGE_DEFS.slice(1) : STAGE_DEFS;
+    h += '<div style="display:flex;gap:4px;align-items:stretch;margin-bottom:4px;">'
+      + '<div style="flex:0 0 56px;display:flex;flex-direction:column;justify-content:center;font-size:11px;font-weight:800;color:#444;">' + ph + '<span style="font-size:10px;font-weight:500;color:#999;">' + rt + '대</span></div>';
+    for (const d of defs) {
+      const n = _stageData[ph + '|' + d.key].length;
+      h += '<div onclick="openStageModal(\''+ph+'|'+d.key+'\')" title="'+ph+' '+d.desc+'" style="flex:'+(n||0.4)+' 1 0;min-width:64px;cursor:pointer;background:'+d.color+(n?'':'55')+';border-radius:6px;padding:8px 6px;color:#fff;text-align:center;">'
+        + '<div style="font-size:11px;font-weight:600;opacity:.95;">'+d.key+'</div>'
+        + '<div style="font-size:19px;font-weight:800;line-height:1.1;">'+n+'<span style="font-size:11px;font-weight:500;">대</span></div>'
+        + '<div style="font-size:9px;opacity:.85;">'+(rt?Math.round(n/rt*100):0)+'%</div></div>';
+    }
+    h += '</div>';
   }
-  h += '</div>';
-  h += '<div style="font-size:10px;color:#aaa;margin-top:6px;">실측 10~20 · 서포트 20~30 · 설치 30~80 · 품질 80~90 · 턴온 90~100 (착수전 &lt;10)</div>';
+  h += '<div style="font-size:10px;color:#aaa;margin-top:6px;">PRE·FINAL 각각 실측 10~20 · 서포트 20~30 · 설치 30~80 · 품질 80~90 · 턴온 90~100 (착수전 &lt;10) · FINAL 보고가 시작된 공종은 FINAL 값, 아니면 PRE 값 · 비율은 줄별</div>';
   h += '</div>';
   el.innerHTML = h;
 }
@@ -5337,9 +5436,7 @@ function computeTAT() {
   const today = cstToday();
   const byEq = new Map();
   for (const r of recs) { const c = catOfR(r); if (!c) continue; if (!byEq.has(r.e)) byEq.set(r.e, { v:r.v||'', rs:[] }); byEq.get(r.e).rs.push({ d:r.d, c, p:r.p, ph:r.ph||'' }); }
-  const equips = [], cellsByCat = {};
-  const stageDurs = { '실측':[], '서포트':[], '설치':[], '품질':[], '턴온':[] };
-  const TH = [0.10, 0.20, 0.30, 0.80, 0.90];
+  const equips = [];
   for (const [eq, o] of byEq) {
     const rs = o.rs.slice().sort((a,b) => a.d < b.d ? -1 : a.d > b.d ? 1 : 0);
     let rawStart = null; for (const r of rs) if (r.p >= TAT_START) { rawStart = r.d; break; }
@@ -5354,26 +5451,15 @@ function computeTAT() {
     const dates = [...new Set(rs.map(r => r.d))].sort();
     const cum = {}; cats.forEach(c => cum[c] = { pre: 0, final: 0 });   // 공종별 PRE/FINAL 누적
     const wOf = (c) => PROG_PRE_W * Math.max(cum[c].pre, cum[c].final) + PROG_FINAL_W * cum[c].final;  // 보정 가중
-    const thDate = {};
     let end = null;
     for (const d of dates) {
       for (const r of rs) if (r.d === d) { const o = cum[r.c]; if (r.ph === 'FINAL') { if (r.p > o.final) o.final = r.p; } else { if (r.p > o.pre) o.pre = r.p; } }
-      const overall = cats.reduce((s,c) => s + Math.min(1, wOf(c)), 0) / cats.length;
-      for (const t of TH) if (thDate[t] == null && overall >= t - TAT_EPS) thDate[t] = d;
       if (cats.every(c => wOf(c) >= TAT_DONE - TAT_EPS)) { end = d; break; }
     }
     if (!end && isTurnedOn(eq)) end = rs[rs.length-1].d;
     const done = end != null;
     const tat = _ddG(start, done ? end : today);
-    // 공정 단계별 소요일 (불완전 설비는 제외 — 초기 단계 누락)
-    const sd = { '실측':null, '서포트':null, '설치':null, '품질':null, '턴온':null };
-    if (!censored) {
-      if (thDate[0.10] && thDate[0.20]) sd['실측'] = _ddG(thDate[0.10], thDate[0.20]);
-      if (thDate[0.20] && thDate[0.30]) sd['서포트'] = _ddG(thDate[0.20], thDate[0.30]);
-      if (thDate[0.30] && thDate[0.80]) sd['설치'] = _ddG(thDate[0.30], thDate[0.80]);
-      if (thDate[0.80] && thDate[0.90]) sd['품질'] = _ddG(thDate[0.80], thDate[0.90]);
-      if (thDate[0.90] && end) sd['턴온'] = _ddG(thDate[0.90], end);
-    }
+    const sd = tatStageDurs(rs, cats);
     const eqCells = [];
     for (const c of cats) {
       const cr = rs.filter(r => r.c === c).sort((a,b) => a.d < b.d ? -1 : 1);
@@ -5393,17 +5479,54 @@ function computeTAT() {
   }
   return { equips, today };
 }
+// [2026-10-30] 공정 단계별 소요일 재정의 — 공정 단계 현황과 같은 기준
+//  - 이전: PRE·FINAL 가중 합산(0.7/0.3)한 설비 평균값에 10/20/30/80/90% 구간을 적용 → 실측이 PRE 14~29%, 품질이 FINAL 33~67%로 어긋났고,
+//    완료(80%) 시점에 계산을 멈춰 턴온은 항상 0일이었다.
+//  - 지금: 공종 × PRE/FINAL별로 보고된 원래 값(누적 최대)이 단계 하한(10/20/30/80/90/100%)을 처음 넘은 날을 진입일로 보고,
+//    다음 단계 진입일까지의 일수를 그 단계 소요일로 센다.
+//  - 진입일을 모르는 경우는 제외: 첫 보고에서 이미 그 단계 이상(실측은 관측 시작일 이후 첫 보고면 인정), 한 번의 보고로 단계를 건너뜀.
+const TAT_STAGE_SEQ = ['실측','서포트','설치','품질','턴온'];
+const TAT_STAGE_LO = [0.10, 0.20, 0.30, 0.80, 0.90, 1.00];   // 마지막 = 100% 도달(턴온 종료)
+function tatStageDurs(rs, cats) {
+  const out = { PRE:{}, FINAL:{} };
+  for (const ph of STAGE_PHASES) for (const s of TAT_STAGE_SEQ) out[ph][s] = [];
+  for (const c of cats) for (const ph of STAGE_PHASES) {
+    const cr = rs.filter(r => r.c === c && (ph === 'FINAL' ? r.ph === 'FINAL' : r.ph !== 'FINAL'));
+    if (!cr.length) continue;
+    const ent = [], before = [];   // 단계별 진입일, 진입 직전 보고일
+    let mx = 0, lastD = null;
+    for (const r of cr) {
+      for (let i = 0; i < TAT_STAGE_LO.length; i++) {
+        const lo = TAT_STAGE_LO[i] - TAT_EPS;
+        if (ent[i] == null && r.p >= lo && mx < lo) { ent[i] = r.d; before[i] = lastD; }
+      }
+      if (r.p > mx) mx = r.p;
+      lastD = r.d;
+    }
+    for (let i = 0; i < TAT_STAGE_SEQ.length; i++) {
+      if (ent[i] == null || ent[i+1] == null || ent[i] === ent[i+1]) continue;
+      if (before[i] == null && !(i === 0 && _tatObsStart && cr[0].d > _tatObsStart)) continue;
+      out[ph][TAT_STAGE_SEQ[i]].push(_ddG(ent[i], ent[i+1]));
+    }
+  }
+  return out;
+}
 // 필터된 설비 집합으로 집계(요약·공정단계·공종별) 재계산 — 불완전은 항상 제외
+//  (공정 단계 소요일은 단계 진입일을 직접 관측한 구간만 쓰므로 불완전 설비도 포함)
 function tatAgg(eqs) {
-  const STAGE_SEQ = ['실측','서포트','설치','품질','턴온'];
-  const cellsByCat = {}, stageDurs = { '실측':[], '서포트':[], '설치':[], '품질':[], '턴온':[] };
+  const cellsByCat = {}, stageDurs = { PRE:{}, FINAL:{} };
+  for (const ph of STAGE_PHASES) for (const s of TAT_STAGE_SEQ) stageDurs[ph][s] = [];
   for (const e of eqs) {
+    if (e.stageDur) for (const ph of STAGE_PHASES) for (const s of TAT_STAGE_SEQ) stageDurs[ph][s].push(...e.stageDur[ph][s]);
     if (e.censored) continue;
     for (const c of e.cells) if (c.done && c.tat != null) (cellsByCat[c.c] = cellsByCat[c.c] || []).push(c.tat);
-    if (e.stageDur) for (const k of STAGE_SEQ) if (e.stageDur[k] != null) stageDurs[k].push(e.stageDur[k]);
   }
   const byCat = Object.entries(cellsByCat).map(([c,arr]) => ({ cat:c, n:arr.length, avg: arr.reduce((s,x)=>s+x,0)/arr.length })).sort((a,b) => b.avg - a.avg);
-  const stageAvg = STAGE_SEQ.map(s => { const a = stageDurs[s]; return { stage:s, n:a.length, avg: a.length ? a.reduce((x,y)=>x+y,0)/a.length : 0 }; });
+  const stageAvg = {};
+  for (const ph of STAGE_PHASES) stageAvg[ph] = TAT_STAGE_SEQ.map(s => {
+    const a = stageDurs[ph][s].slice().sort((x,y) => x-y);
+    return { stage:s, n:a.length, avg: a.length ? a.reduce((x,y)=>x+y,0)/a.length : 0, med: a.length ? a[a.length >> 1] : 0 };
+  });
   const doneEq = eqs.filter(e => e.done && !e.censored), ongoingEq = eqs.filter(e => e.ongoing && !e.censored);
   const censoredN = eqs.filter(e => e.censored).length;
   return {
@@ -5661,25 +5784,30 @@ function renderTATSection() {
   h += '<div style="font-size:10px;color:#aaa;margin-bottom:10px;">※ 관측 시작일('+_tatObsStart+') 이전에 착수했거나 첫 보고가 이미 '+Math.round(TAT_CENSOR_P*100)+'%↑인 설비는 실제 착수를 놓쳐 TAT가 짧게 계산됨 → 평균에서 제외하고 ‹ 로 표시. 실제 착수일을 알면 막대 클릭 후 보정 가능.</div>';
 
   // 공정 단계별 평균 소요일 (실측→서포트→설치→품질→턴온)
-  h += '<div style="font-size:12px;font-weight:700;color:#555;margin:6px 0 5px;">공정 단계별 평균 소요일 <span style="font-weight:400;color:#aaa;">(단계 통과 설비 기준 · 불완전 제외)</span></div>';
-  const stAvg = (agg.stageAvg || []).filter(s => s.n > 0);
-  if (!stAvg.length) h += '<div style="font-size:11px;color:#bbb;margin-bottom:12px;">단계 통과 데이터 없음</div>';
-  else {
-    const stColor = {}; STAGE_DEFS.forEach(s => stColor[s.key] = s.color);
+  h += '<div style="font-size:12px;font-weight:700;color:#555;margin:6px 0 5px;">공정 단계별 평균 소요일 <span style="font-weight:400;color:#aaa;">(공종별 보고값 기준 · 단계 진입일을 관측한 구간만 · 단위 = 공종 셀)</span></div>';
+  const stColor = {}; STAGE_DEFS.forEach(s => stColor[s.key] = s.color);
+  let anyStage = false;
+  for (const ph of STAGE_PHASES) {
+    const stAvg = ((agg.stageAvg || {})[ph] || []).filter(s => s.n > 0);
+    if (!stAvg.length) continue;
+    anyStage = true;
     const totAvg = stAvg.reduce((s,x) => s + x.avg, 0);
+    h += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;"><span style="width:42px;font-size:11px;font-weight:700;color:#555;">'+ph+'</span>';
     // 세그먼트 바
-    h += '<div style="display:flex;height:26px;border-radius:5px;overflow:hidden;margin-bottom:4px;">';
+    h += '<div style="flex:1;min-width:0;display:flex;height:26px;border-radius:5px;overflow:hidden;">';
     for (const s of stAvg) {
       const w = totAvg ? Math.max(6, s.avg/totAvg*100) : 100/stAvg.length;
       const col = stColor[s.stage] || '#888';
-      h += '<div title="'+esc(s.stage)+' 평균 '+Math.round(s.avg)+'일 · '+s.n+'대" style="width:'+w+'%;background:'+col+';color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:10px;line-height:1.15;border-right:1px solid #fff;">'
+      h += '<div title="'+ph+' '+esc(s.stage)+' 평균 '+Math.round(s.avg)+'일 · 중앙값 '+s.med+'일 · '+s.n+'셀" style="width:'+w+'%;min-width:0;background:'+col+';color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:10px;line-height:1.15;border-right:1px solid #fff;overflow:hidden;white-space:nowrap;">'
         + '<span style="font-weight:700;">'+esc(s.stage)+'</span><span>'+Math.round(s.avg)+'일</span></div>';
     }
-    h += '</div>';
-    h += '<div style="display:flex;flex-wrap:wrap;gap:10px;font-size:10px;color:#777;margin-bottom:12px;">';
-    for (const s of stAvg) h += '<span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:'+(stColor[s.stage]||'#888')+';margin-right:3px;"></span>'+esc(s.stage)+' '+Math.round(s.avg)+'일 ('+s.n+'대)</span>';
-    h += '<span style="color:#333;font-weight:600;">합계 평균 '+Math.round(totAvg)+'일</span></div>';
+    h += '</div></div>';
+    h += '<div style="display:flex;flex-wrap:wrap;gap:10px;font-size:10px;color:#777;margin:0 0 8px 48px;">';
+    for (const s of stAvg) h += '<span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:'+(stColor[s.stage]||'#888')+';margin-right:3px;"></span>'+esc(s.stage)+' '+Math.round(s.avg)+'일 (중앙 '+s.med+'일 · '+s.n+'셀)</span>';
+    h += '<span style="color:#333;font-weight:600;">합계 '+Math.round(totAvg)+'일</span></div>';
   }
+  if (!anyStage) h += '<div style="font-size:11px;color:#bbb;margin-bottom:12px;">단계 통과 데이터 없음</div>';
+  else h += '<div style="font-size:10px;color:#aaa;margin:-2px 0 12px 48px;">※ 단계 진입 = 그 공종의 PRE(또는 FINAL) 보고값이 단계 하한(10·20·30·80·90%)을 처음 넘은 날, 턴온 종료 = 100% 도달. 첫 보고에서 이미 넘었거나 한 번에 건너뛴 단계는 날짜를 알 수 없어 제외.</div>';
 
   // 공종별 평균 TAT
   h += '<div style="font-size:12px;font-weight:700;color:#555;margin:6px 0 5px;">공종별 평균 TAT <span style="font-weight:400;color:#aaa;">(80% 도달 완료 셀 기준)</span></div>';
