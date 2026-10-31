@@ -23,7 +23,7 @@ if (location.protocol === 'file:') {
 }
 </script>
 <script>
-window.BBTECH_BUILD = '2026-10-31.1';
+window.BBTECH_BUILD = '2026-10-31.2';
 if (typeof window.Chart === 'undefined') {
   window.Chart = class ChartFallback {
     constructor(ctx, config) {
@@ -2363,6 +2363,7 @@ const REVISIONS = [
   ]},
   { date: '2026-10-31', items: [
     '엑셀 완료 보정 — 기술인 개별 보고는 FINAL 85~95%에서 마감(100%) 보고를 빠뜨리는 경우가 많아(엑셀 100%인 공종 505건 중 279건), Daily Report 엑셀 진척이 100%인 공종은 시트 값과 관계없이 PRE·FINAL 100%로 계산. 시공 완료·평균 진행률·공정 단계 현황 등 전체에 반영되며 SL 섹션의 체크박스로 끌 수 있음(브라우저별 저장). 원본 시트 보고는 바꾸지 않음. 단계 목록에 보정된 공종은 "(엑셀)" 표시',
+    '[.2] 공정 단계 현황 FINAL 줄에 "완료" 칸 추가 — 모든 공종 FINAL 100% 또는 턴온 확인 등록 설비(상단 시공 완료 설비 KPI와 같은 기준). 이전에는 완료 설비가 턴온(90~100%)에 섞여 있었음',
     '보고 마감 누락 점검 — 엑셀 100%인데 시트 FINAL이 100%가 아닌 설비·세부공종을 마지막 보고자별로 묶어 표시(마지막 보고일·경과일), 엑셀 다운로드'
   ]},
   { date: '2026-10-17', items: [
@@ -5355,7 +5356,9 @@ const STAGE_PHASES = ['PRE', 'FINAL'];
 //  - FINAL은 착수 자체가 이미 PRE 이후이므로 착수전 칸이 없고 10% 미만도 실측으로 본다.
 const STAGE_DEFS_PH = {
   PRE:   [...STAGE_DEFS.slice(0, 3), { ...STAGE_DEFS[3], hi: 1.01, desc: '설치 (30~100%)' }],
-  FINAL: STAGE_DEFS.slice(1)
+  // [2026-10-31] 완료 칸 추가 — 모든 공종 FINAL 100% 또는 턴온 확인 등록 (상단 '시공 완료 설비' KPI와 같은 기준). 턴온은 90~100% 미만
+  FINAL: [...STAGE_DEFS.slice(1, 5), { ...STAGE_DEFS[5], hi: 1.0, desc: '턴온 (90~100% 미만)' },
+          { key:'완료', lo:1.0, hi:1.01, color:'#14532d', desc:'완료 (모든 공종 FINAL 100% 또는 턴온 확인 등록)' }]
 };
 function stageOfPh(ph, p) {
   const defs = STAGE_DEFS_PH[ph] || STAGE_DEFS;
@@ -5425,7 +5428,7 @@ function renderStageSection(data) {
   STAGE_PHASES.forEach(ph => STAGE_DEFS_PH[ph].forEach(s => _stageData[ph + '|' + s.key] = []));
   for (const [eq, cats] of raw) {
     const v = vendorOf.get(eq) || '';
-    if (isTurnedOn(eq)) { _stageData['FINAL|턴온'].push({ eq, v, p: 1, detail: '턴온 확인 등록' }); continue; }
+    if (isTurnedOn(eq)) { _stageData['FINAL|완료'].push({ eq, v, p: 1, detail: '턴온 확인 등록' }); continue; }
     if (!cats.size) { _stageData['미보고'].push({ eq, v, p: 0, n: recCount.get(eq) || 0, detail: '' }); continue; }
     const st = equipStageStatus(eq, cats); if (!st) continue;
     const sd = stageOfPh(st.ph, st.p);
@@ -5452,7 +5455,7 @@ function renderStageSection(data) {
     }
     h += '</div>';
   }
-  h += '<div style="font-size:10px;color:#aaa;margin-top:6px;">PRE: 착수전 &lt;10 · 실측 10~20 · 서포트 20~30 · 설치 30~100 / FINAL: 실측 ~20 · 서포트 20~30 · 설치 30~80 · 품질 80~90 · 턴온 90~100 · FINAL 보고가 시작된 공종은 FINAL 값, 아니면 PRE 값 · 비율은 줄별</div>';
+  h += '<div style="font-size:10px;color:#aaa;margin-top:6px;">PRE: 착수전 &lt;10 · 실측 10~20 · 서포트 20~30 · 설치 30~100 / FINAL: 실측 ~20 · 서포트 20~30 · 설치 30~80 · 품질 80~90 · 턴온 90~100 미만 · 완료 = 모든 공종 FINAL 100% 또는 턴온 확인 등록 · FINAL 보고가 시작된 공종은 FINAL 값, 아니면 PRE 값 · 비율은 줄별</div>';
   h += '</div>';
   el.innerHTML = h;
 }
