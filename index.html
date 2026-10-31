@@ -23,7 +23,7 @@ if (location.protocol === 'file:') {
 }
 </script>
 <script>
-window.BBTECH_BUILD = '2026-10-30.3';
+window.BBTECH_BUILD = '2026-10-31.1';
 if (typeof window.Chart === 'undefined') {
   window.Chart = class ChartFallback {
     constructor(ctx, config) {
@@ -2361,6 +2361,10 @@ const REVISIONS = [
     '[.2] PRE에는 품질·턴온 단계가 없으므로 PRE는 착수전·실측·서포트·설치(30~100%)로만 구분 — 공정 단계 현황과 TAT 단계 소요일 모두. 품질·턴온은 FINAL에만 표시',
     '[.3] SL1+ / SL2 일정(계획 대비) 섹션 추가 — BBTech America Daily Report 엑셀의 설비별 SL1+·SL2 계획일과 세부공종 진척으로 완료·진행중·임박(7일 이내)·지연·미정 집계, 주별 계획 대비 누적 완료 추이, 지연·임박 설비 목록, 설비별 일정표(검색·상태 필터). SL1+ = Bulk Gas·PCW + 진공, SL2 = 전체. 완료는 엑셀 진척 100% 기준이고 시트 FINAL 진척을 함께 표시해 차이 나는 설비 표시. 일정 데이터는 sl-schedule.js(설비별 일정\\일정_가져오기.cmd로 생성)'
   ]},
+  { date: '2026-10-31', items: [
+    '엑셀 완료 보정 — 기술인 개별 보고는 FINAL 85~95%에서 마감(100%) 보고를 빠뜨리는 경우가 많아(엑셀 100%인 공종 505건 중 279건), Daily Report 엑셀 진척이 100%인 공종은 시트 값과 관계없이 PRE·FINAL 100%로 계산. 시공 완료·평균 진행률·공정 단계 현황 등 전체에 반영되며 SL 섹션의 체크박스로 끌 수 있음(브라우저별 저장). 원본 시트 보고는 바꾸지 않음. 단계 목록에 보정된 공종은 "(엑셀)" 표시',
+    '보고 마감 누락 점검 — 엑셀 100%인데 시트 FINAL이 100%가 아닌 설비·세부공종을 마지막 보고자별로 묶어 표시(마지막 보고일·경과일), 엑셀 다운로드'
+  ]},
   { date: '2026-10-17', items: [
     '자동 동기화 주기를 1분에서 15분으로 변경',
     '웹 배포 화면에서 자동 동기화 체크박스를 켜고 끌 수 있도록 변경 — 선택 상태는 브라우저별로 유지',
@@ -4684,6 +4688,7 @@ function buildEquipCategoryMax(records) {
     else { if (r.p > o.pre) o.pre = r.p; }     // PRE 또는 공란
   }
   const m = new Map();
+  const xl = xlDoneCats();
   for (const [eq, cm] of tmp) {
     const out = new Map();
     for (const [c, o] of cm) {
@@ -4691,9 +4696,39 @@ function buildEquipCategoryMax(records) {
       const fin = o.final === -Infinity ? 0 : o.final;
       out.set(c, PROG_PRE_W * Math.max(pre, fin) + PROG_FINAL_W * fin);
     }
+    const xc = xl.get(String(eq).toUpperCase());
+    if (xc) for (const c of xc) out.set(c, 1);   // 엑셀(Daily Report) 완료 보정
     m.set(eq, out);
   }
   return m;
+}
+
+// ── [2026-10-31] 엑셀 완료 보정 ─────────────────────────────────────────
+//  기술인 개별 보고는 FINAL 85~95%에서 마감 보고를 빠뜨리는 경우가 많다 (엑셀 100%인 공종 505건 중 279건).
+//  Daily Report(엑셀)가 더 신뢰도가 높으므로, 엑셀 세부공종 진척이 100%인 공종은 시트 값과 관계없이 PRE·FINAL 100%로 본다.
+//  엑셀 중간값은 PRE/FINAL로 나눌 수 없어 쓰지 않는다. 원본 시트 보고는 바꾸지 않고 계산에서만 보정 (체크박스로 끌 수 있음).
+//  BULK는 엑셀의 Bulk·Exhaust 중 해당 공종이 모두 100%일 때만 완료.
+const XL_FIX_KEY = 'bbtech_xlfix';
+let _xlFix = (function(){ try { return localStorage.getItem(XL_FIX_KEY) !== '0'; } catch(e){ return true; } })();
+const XL_BASE_CAT = { 'Bulk':'BULK', 'Exhaust':'BULK', 'Foreline':'VACUUM', 'S.GAS':'S-GAS', 'UPW/Drain':'UPW', 'Chemical':'CHEMICAL' };
+let _xlDoneCache = { src: null, on: null, m: new Map() };
+function xlDoneCats() {
+  const S = window.BB_SL_SCHEDULE;
+  if (_xlDoneCache.src === S && _xlDoneCache.on === _xlFix) return _xlDoneCache.m;
+  const m = new Map();
+  if (_xlFix && S && Array.isArray(S.tools)) for (const t of S.tools) {
+    const st = {};   // 기준 공종 → 해당 엑셀 세부공종이 모두 100%인가
+    for (const [k, v] of Object.entries(t.p || {})) { const c = XL_BASE_CAT[k]; if (!c) continue; st[c] = (st[c] !== false) && v >= 0.999; }
+    const done = Object.keys(st).filter(c => st[c]);
+    if (done.length) m.set(String(t.t).toUpperCase(), new Set(done));
+  }
+  _xlDoneCache = { src: S, on: _xlFix, m };
+  return m;
+}
+function setXlFix(b) {
+  _xlFix = !!b;
+  try { localStorage.setItem(XL_FIX_KEY, _xlFix ? '1' : '0'); } catch(e){}
+  if (typeof refreshSyncedDashboard === 'function') refreshSyncedDashboard();
 }
 
 function getEquipMasterCategories(eq) {
@@ -5335,7 +5370,7 @@ function equipStageStatus(eq, cats) {
   for (const c of list) {
     const o = cats.get(c) || { pre: null, fin: null };
     const st = o.fin != null ? { ph: 'FINAL', p: o.fin } : { ph: 'PRE', p: o.pre != null ? o.pre : 0 };
-    parts.push(c + ' ' + (st.ph === 'FINAL' ? 'F' : 'P') + Math.round(st.p * 100));
+    parts.push(c + ' ' + (st.ph === 'FINAL' ? 'F' : 'P') + Math.round(st.p * 100) + (o.xl ? '(엑셀)' : ''));
     if (!worst || (st.ph === 'PRE' && worst.ph === 'FINAL') || (st.ph === worst.ph && st.p < worst.p)) worst = st;
   }
   if (!worst) return null;
@@ -5379,6 +5414,12 @@ function renderStageSection(data) {
     if (!cm.has(c)) cm.set(c, { pre: null, fin: null });
     const o = cm.get(c), k = r.ph === 'FINAL' ? 'fin' : 'pre';
     if (o[k] == null || r.p > o[k]) o[k] = r.p;
+  }
+  // 엑셀 완료 보정 — 시트가 마감 보고를 빠뜨린 공종은 PRE·FINAL 100%로
+  const xl = xlDoneCats();
+  for (const [eq, cm] of raw) {
+    const xc = xl.get(String(eq).toUpperCase()); if (!xc) continue;
+    for (const c of xc) { const o = cm.get(c); if (!o || o.fin == null || o.fin < 1 - STAGE_EPS) cm.set(c, { pre: 1, fin: 1, xl: true }); }
   }
   _stageData = { '미보고': [] };
   STAGE_PHASES.forEach(ph => STAGE_DEFS_PH[ph].forEach(s => _stageData[ph + '|' + s.key] = []));
@@ -5923,13 +5964,19 @@ let _slMs = 'SL1p', _slFilter = '', _slQuery = '', _slDiffOnly = false, _slSheet
 function loadSlSchedule() {
   const s = document.createElement('script');
   s.src = 'sl-schedule.js?_bb=' + Date.now();
-  s.onload = () => { try { renderSLSection(); } catch (e) { console.error('sl', e); } };
+  s.onload = () => {
+    try {
+      // 엑셀 완료 보정이 켜져 있으면 진척 계산 전체를 다시 그린다
+      if (_xlFix && Array.isArray(_stored) && _stored.length && typeof refreshSyncedDashboard === 'function') refreshSyncedDashboard();
+      else renderSLSection();
+    } catch (e) { console.error('sl', e); }
+  };
   s.onerror = () => console.warn('sl-schedule.js 없음 — SL 일정 섹션 생략');
   document.head.appendChild(s);
 }
 window.addEventListener('load', loadSlSchedule);
 
-// 시트 진척: 설비 → 엑셀 세부공종 → { pre, fin, finDone(FINAL 100% 첫 보고일), last(마지막 보고일) }
+// 시트 진척: 설비 → 엑셀 세부공종 → { pre, fin, finDone(FINAL 100% 첫 보고일), last(마지막 보고일), lastW(마지막 보고자) }
 function slSheetMap() {
   const recs = Array.isArray(_stored) ? _stored : [];
   if (_slSheetCache.n === recs.length && _slSheetCache.m) return _slSheetCache.m;
@@ -5940,10 +5987,10 @@ function slSheetMap() {
     const sc = base === 'BULK' ? (r.cf && /EXH/i.test(String(r.cf)) ? 'Exhaust' : 'Bulk') : base;
     const e = String(r.e).toUpperCase();
     if (!m.has(e)) m.set(e, {});
-    const o = (m.get(e)[sc] = m.get(e)[sc] || { pre: 0, fin: 0, finDone: null, last: '' });
+    const o = (m.get(e)[sc] = m.get(e)[sc] || { pre: 0, fin: 0, finDone: null, last: '', lastW: '' });
     if (r.ph === 'FINAL') { if (r.p > o.fin) o.fin = r.p; if (r.p >= 0.999 && (!o.finDone || r.d < o.finDone)) o.finDone = r.d; }
     else if (r.p > o.pre) o.pre = r.p;
-    if (r.d > o.last) o.last = r.d;
+    if (r.d >= o.last) { o.last = r.d; o.lastW = r.w || ''; }
   }
   _slSheetCache = { n: recs.length, m };
   return m;
@@ -6044,6 +6091,7 @@ function renderSLSection(tableOnly) {
   h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;"><span style="font-size:13px;font-weight:800;color:#222;">📅 SL1+ / SL2 일정 (계획 대비)</span>'
     + '<span style="font-size:11px;color:#888;">Daily Report '+esc(S.reportDate)+' 기준'+(S.workDate ? ' (작업일 '+esc(S.workDate)+')' : '')+' · 설비 '+S.tools.length+'대 · 오늘 '+today+'</span>'
     + '<span style="flex:1;"></span>'
+    + '<label title="엑셀 세부공종 진척이 100%인 공종은 시트 보고와 관계없이 PRE·FINAL 100%로 계산 (공정 단계 현황·시공 완료·평균 진행률 등 전체)" style="font-size:11px;color:#1f6f8b;cursor:pointer;font-weight:600;"><input type="checkbox" '+(_xlFix ? 'checked' : '')+' onchange="setXlFix(this.checked)" style="vertical-align:middle;"> 엑셀 완료 보정 '+(_xlFix ? '적용 중 ('+[...xlDoneCats().values()].reduce((s, x) => s + x.size, 0)+'개 공종)' : '꺼짐')+'</label>'
     + '<span style="font-size:10px;color:#999;">SL1+ = Bulk Gas·PCW + 진공 설치 완료 · SL2 = 전체 설치 완료</span></div>';
 
   // 요약 카드 (SL1+ / SL2)
@@ -6093,9 +6141,60 @@ function renderSLSection(tableOnly) {
   h += '<label style="font-size:11px;color:#666;cursor:pointer;"><input type="checkbox" '+(_slDiffOnly ? 'checked' : '')+' onchange="setSlDiffOnly(this.checked)" style="vertical-align:middle;"> 시트 차이만</label>'
     + '<span style="flex:1;"></span><input type="search" placeholder="설비 · PM 검색" value="'+esc(_slQuery)+'" oninput="setSlQuery(this.value)" style="font-size:11px;padding:3px 6px;border:1px solid #ccc;border-radius:4px;width:150px;"></div>';
   h += '<div id="slTable">' + tableHtml() + '</div>';
+  h += slGapHtml(esc);
   h += '</div>';
   el.innerHTML = h;
   drawSlCurve(rows, today);
+}
+
+// 보고 마감 누락: 엑셀은 100%인데 시트 FINAL이 100%가 아닌 설비·세부공종 (마지막 보고자 기준으로 묶음)
+let _slGapOpen = false;
+function slReportGaps() {
+  const S = window.BB_SL_SCHEDULE; if (!S || !Array.isArray(S.tools)) return [];
+  const sheet = slSheetMap(), today = cstToday(), out = [];
+  for (const t of S.tools) for (const [k, v] of Object.entries(t.p || {})) {
+    const cat = SL_SHEET_CAT[k]; if (!cat || v < 0.999) continue;
+    const o = (sheet.get(t.t) || {})[cat] || null;
+    if (o && o.fin >= 0.999) continue;
+    out.push({ w: o && o.lastW ? o.lastW : '(시트 보고 없음)', t: t.t, pm: t.pm || '', k, pre: o ? o.pre : null, fin: o ? o.fin : null,
+      last: o ? o.last : '', idle: o && o.last ? _ddG(o.last, today) : null,
+      type: !o ? '시트 보고 없음' : o.fin > 0 ? 'FINAL 미마감' : 'FINAL 보고 없음' });
+  }
+  return out;
+}
+function slGapExport() {
+  if (typeof XLSX === 'undefined') return;
+  const S = window.BB_SL_SCHEDULE || {};
+  const aoa = [['마지막 보고자', '설비', 'PM', '세부공종', '구분', '시트 PRE %', '시트 FINAL %', '마지막 보고일', '경과일', '엑셀 진척 %']];
+  const pc = v => v == null ? '' : Math.round(v * 100);
+  for (const g of slReportGaps().sort((a, b) => (a.w < b.w ? -1 : a.w > b.w ? 1 : (a.t < b.t ? -1 : 1))))
+    aoa.push([g.w, g.t, g.pm, g.k, g.type, pc(g.pre), pc(g.fin), g.last, g.idle == null ? '' : g.idle, 100]);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), '보고 마감 누락');
+  XLSX.writeFile(wb, 'BBTECH_보고마감누락_' + (S.reportDate || cstToday()) + '.xlsx');
+}
+function slGapHtml(esc) {
+  const gaps = slReportGaps();
+  if (!gaps.length) return '';
+  const byW = new Map();
+  for (const g of gaps) { if (!byW.has(g.w)) byW.set(g.w, []); byW.get(g.w).push(g); }
+  const ws = [...byW.entries()].sort((a, b) => b[1].length - a[1].length);
+  const tc = {}; gaps.forEach(g => tc[g.type] = (tc[g.type] || 0) + 1);
+  let h = '<details '+(_slGapOpen ? 'open' : '')+' ontoggle="_slGapOpen=this.open" style="margin-top:10px;border:1px solid #f0dcae;background:#fffaf0;border-radius:8px;padding:6px 10px;">'
+    + '<summary style="cursor:pointer;font-size:12px;font-weight:700;color:#7a5c00;">📝 보고 마감 누락 점검 — 엑셀 100%인데 시트 미마감 '+gaps.length+'건 · 마지막 보고자 '+ws.length+'명'
+    + ' <span style="font-weight:400;color:#9a7a20;">('+Object.entries(tc).map(([k, n]) => k + ' ' + n).join(' · ')+')</span></summary>'
+    + '<div style="display:flex;align-items:center;gap:8px;margin:6px 0;flex-wrap:wrap;"><span style="font-size:10px;color:#8a6d1f;">기술인 개별 보고에서 FINAL 마감(100%)이 빠진 항목입니다. 마지막으로 그 공종을 보고한 사람 기준으로 묶었습니다. 엑셀 완료 보정이 켜져 있으면 대시보드 계산에는 이미 완료로 반영됩니다.</span>'
+    + '<span style="flex:1;"></span><button onclick="slGapExport()" style="background:#1f7a3d;color:#fff;border:none;padding:3px 10px;border-radius:4px;font-size:11px;cursor:pointer;">엑셀 다운로드</button></div>'
+    + '<div style="max-height:360px;overflow:auto;">';
+  for (const [w, list] of ws) {
+    list.sort((a, b) => (b.idle || 0) - (a.idle || 0));
+    h += '<div style="display:flex;gap:8px;padding:4px 0;border-bottom:1px solid #f3e6c4;font-size:11px;"><span style="flex:0 0 96px;font-weight:700;">'+esc(w)+' <span style="color:#c0392b;">'+list.length+'</span></span><span style="flex:1;min-width:0;color:#555;line-height:1.6;">'
+      + list.map(g => '<span style="white-space:nowrap;margin-right:10px;"><b>'+esc(g.t)+'</b> '+esc(SL_SCOPE_SHORT[g.k] || g.k)+' '
+        + (g.fin == null ? '<span style="color:#999;">보고 없음</span>' : (g.fin > 0 ? 'F' + Math.round(g.fin * 100) : 'P' + Math.round(g.pre * 100) + '·F없음'))
+        + (g.last ? ' <span style="color:#999;">' + g.last.slice(5) + ' (' + g.idle + '일)</span>' : '') + '</span>').join(' ')
+      + '</span></div>';
+  }
+  return h + '</div></details>';
 }
 
 function drawSlCurve(rows, today) {
