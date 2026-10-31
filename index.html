@@ -23,7 +23,7 @@ if (location.protocol === 'file:') {
 }
 </script>
 <script>
-window.BBTECH_BUILD = '2026-10-31.3';
+window.BBTECH_BUILD = '2026-10-31.4';
 if (typeof window.Chart === 'undefined') {
   window.Chart = class ChartFallback {
     constructor(ctx, config) {
@@ -1122,6 +1122,7 @@ function mergeInto(existing, incoming) {
 }
 function applyStoredRecords(incoming) {
   _stored = Array.isArray(incoming) ? incoming.slice() : [];
+  if (typeof applyEqAlias === 'function') applyEqAlias(_stored);   // 시트 설비명 오기 → 엑셀 툴 ID
   renormalizeManDays(_stored);
   if (typeof records !== 'undefined' && Array.isArray(records)) {
     records.splice(0, records.length, ..._stored);
@@ -2365,6 +2366,7 @@ const REVISIONS = [
     '엑셀 완료 보정 — 기술인 개별 보고는 FINAL 85~95%에서 마감(100%) 보고를 빠뜨리는 경우가 많아(엑셀 100%인 공종 505건 중 279건), Daily Report 엑셀 진척이 100%인 공종은 시트 값과 관계없이 PRE·FINAL 100%로 계산. 시공 완료·평균 진행률·공정 단계 현황 등 전체에 반영되며 SL 섹션의 체크박스로 끌 수 있음(브라우저별 저장). 원본 시트 보고는 바꾸지 않음. 단계 목록에 보정된 공종은 "(엑셀)" 표시',
     '[.2] 공정 단계 현황 FINAL 줄에 "완료" 칸 추가 — 모든 공종 FINAL 100% 또는 턴온 확인 등록 설비(상단 시공 완료 설비 KPI와 같은 기준). 이전에는 완료 설비가 턴온(90~100%)에 섞여 있었음',
     '[.3] SL1+ / SL2 일정 집계 대상을 시트 설비(공정 단계 현황과 같은 456대, 필터 반영)로 변경 — 엑셀에 없는 시트 설비는 "일정없음"(시트 진척으로 완료면 완료), 엑셀에만 있는 툴은 제외하고 개수 표시. 계획 대비 누적 추이는 엑셀 일정 있는 설비만',
+    '[.4] 설비명 자동 정정 — Daily Report 엑셀의 툴 ID를 정답으로 보고, 엑셀에 없는 시트 설비명이 한 글자 차이(바꿈·빠짐·자리바뀜)로 엑셀 ID 하나에만 닿고 그 차이가 앞 6글자에 있으면 그 툴로 합쳐 계산(예: WSBPTS01·DALMTA02·WSFIAT01). 번호만 다르거나 후보가 여럿인 이름은 바꾸지 않고 SL 섹션의 "설비 ID 대조" 점검표·엑셀 다운로드로 제공. 체크박스로 끌 수 있음, 원래 이름은 기록에 함께 보관',
     '보고 마감 누락 점검 — 엑셀 100%인데 시트 FINAL이 100%가 아닌 설비·세부공종을 마지막 보고자별로 묶어 표시(마지막 보고일·경과일), 엑셀 다운로드'
   ]},
   { date: '2026-10-17', items: [
@@ -4733,6 +4735,58 @@ function setXlFix(b) {
   if (typeof refreshSyncedDashboard === 'function') refreshSyncedDashboard();
 }
 
+// ── [2026-10-31] 시트 설비명 → 엑셀 툴 ID 자동 정정 ─────────────────────
+//  Daily Report(엑셀)의 툴 ID는 거의 정확하고, 기술인 보고(시트)는 오기가 많다 (WSBPTS01, DALMTA02, WSFIAT01 …).
+//  엑셀에 없는 시트 설비명 중 한 글자 차이(바꿈·빠짐·자리바뀜)로 닿는 엑셀 ID가 딱 하나이고,
+//  그 차이가 앞 6글자(문자부)에 있으면 같은 설비로 보고 엑셀 ID로 바꾼다. 원래 이름은 r.e0에 남긴다.
+//  번호만 다르거나(DSSGTA01→31?) 후보가 여럿인 경우는 다른 호기일 수 있어 바꾸지 않고 점검표로만 보여준다.
+const EQ_ALIAS_KEY = 'bbtech_eqalias';
+let _eqAliasOn = (function(){ try { return localStorage.getItem(EQ_ALIAS_KEY) !== '0'; } catch(e){ return true; } })();
+let _eqAlias = new Map();   // 시트 설비명 → 엑셀 툴 ID (적용된 것)
+function _within1(a, b) {   // 편집거리(자리바뀜 포함) 1 이하
+  if (a === b) return true;
+  const la = a.length, lb = b.length;
+  if (Math.abs(la - lb) > 1) return false;
+  if (la === lb) {
+    let i = 0; while (i < la && a[i] === b[i]) i++;
+    if (a.slice(i + 1) === b.slice(i + 1)) return true;
+    return i + 1 < la && a[i] === b[i + 1] && a[i + 1] === b[i] && a.slice(i + 2) === b.slice(i + 2);
+  }
+  const s = la < lb ? a : b, l = la < lb ? b : a;
+  let i = 0; while (i < s.length && s[i] === l[i]) i++;
+  return s.slice(i) === l.slice(i + 1);
+}
+function xlToolIds() {
+  const S = window.BB_SL_SCHEDULE;
+  return S && Array.isArray(S.tools) ? new Set(S.tools.map(t => String(t.t).toUpperCase()).filter(isValidEquip)) : null;
+}
+// 엑셀에 없는 설비명 → { auto: 바꿀 ID | null, cands: [후보…] }
+function eqXlMatch(name, xl) {
+  const cands = [...xl].filter(t => _within1(name, t));
+  const auto = cands.length === 1 && name.slice(0, 6) !== cands[0].slice(0, 6) ? cands[0] : null;
+  return { auto, cands };
+}
+function applyEqAlias(recs) {
+  const xl = xlToolIds();
+  if (!Array.isArray(recs) || !xl || !xl.size) return 0;   // 엑셀 일정(sl-schedule.js)을 읽은 뒤에만 동작
+  for (const r of recs) if (r && r.e0 !== undefined) { r.e = r.e0; delete r.e0; }   // 원래 이름으로 되돌린 뒤 다시 계산
+  _eqAlias = new Map();
+  if (!_eqAliasOn) return 0;
+  const names = new Set(recs.map(r => r && r.e).filter(e => e && !xl.has(e)));
+  for (const n of names) { const m = eqXlMatch(n, xl); if (m.auto) _eqAlias.set(n, m.auto); }
+  let k = 0;
+  for (const r of recs) if (r && _eqAlias.has(r.e)) { r.e0 = r.e; r.e = _eqAlias.get(r.e); k++; }
+  try { _slSheetCache = { n: -1, m: null }; } catch(e){}
+  return k;
+}
+function setEqAlias(b) {
+  _eqAliasOn = !!b;
+  try { localStorage.setItem(EQ_ALIAS_KEY, _eqAliasOn ? '1' : '0'); } catch(e){}
+  applyStoredRecords(_stored);
+  try { lsSave(_stored); } catch(e){}
+  if (typeof refreshSyncedDashboard === 'function') refreshSyncedDashboard();
+}
+
 function getEquipMasterCategories(eq) {
   if (!eq) return null;
   return EQUIP_MASTER.get(eq) || null;
@@ -5972,9 +6026,11 @@ function loadSlSchedule() {
   s.src = 'sl-schedule.js?_bb=' + Date.now();
   s.onload = () => {
     try {
-      // 엑셀 완료 보정이 켜져 있으면 진척 계산 전체를 다시 그린다
-      if (_xlFix && Array.isArray(_stored) && _stored.length && typeof refreshSyncedDashboard === 'function') refreshSyncedDashboard();
-      else renderSLSection();
+      // 설비명 정정·엑셀 완료 보정이 켜져 있으면 진척 계산 전체를 다시 그린다
+      if (Array.isArray(_stored) && _stored.length && typeof refreshSyncedDashboard === 'function') {
+        applyStoredRecords(_stored);
+        refreshSyncedDashboard();
+      } else renderSLSection();
     } catch (e) { console.error('sl', e); }
   };
   s.onerror = () => console.warn('sl-schedule.js 없음 — SL 일정 섹션 생략');
@@ -6125,6 +6181,7 @@ function renderSLSection(tableOnly) {
     + '<span style="font-size:11px;color:#888;">Daily Report '+esc(S.reportDate)+' 기준'+(S.workDate ? ' (작업일 '+esc(S.workDate)+')' : '')+' · 시트 설비 <b>'+rows.length+'대</b> (엑셀 일정 있음 '+nXl+' · 일정 없음 '+(rows.length - nXl)+')'
     + (xlOnly.length ? ' · <span title="'+esc(xlOnly.join(' '))+'" style="cursor:help;text-decoration:underline dotted;">엑셀에만 있는 툴 '+xlOnly.length+'대 제외</span>' : '') + ' · 오늘 '+today+'</span>'
     + '<span style="flex:1;"></span>'
+    + '<label title="엑셀에 없는 시트 설비명이 한 글자 차이로 엑셀 툴 ID 하나에만 닿고, 차이가 앞 6글자에 있으면 그 툴로 합쳐서 계산 (번호만 다르거나 후보가 여럿이면 바꾸지 않음 — 아래 ID 대조 점검표)" style="font-size:11px;color:#6f42c1;cursor:pointer;font-weight:600;"><input type="checkbox" '+(_eqAliasOn ? 'checked' : '')+' onchange="setEqAlias(this.checked)" style="vertical-align:middle;"> 설비명 자동 정정 '+(_eqAliasOn ? '적용 중 ('+_eqAlias.size+'개 이름)' : '꺼짐')+'</label>'
     + '<label title="엑셀 세부공종 진척이 100%인 공종은 시트 보고와 관계없이 PRE·FINAL 100%로 계산 (공정 단계 현황·시공 완료·평균 진행률 등 전체)" style="font-size:11px;color:#1f6f8b;cursor:pointer;font-weight:600;"><input type="checkbox" '+(_xlFix ? 'checked' : '')+' onchange="setXlFix(this.checked)" style="vertical-align:middle;"> 엑셀 완료 보정 '+(_xlFix ? '적용 중 ('+[...xlDoneCats().values()].reduce((s, x) => s + x.size, 0)+'개 공종)' : '꺼짐')+'</label>'
     + '<span style="font-size:10px;color:#999;">SL1+ = Bulk Gas·PCW + 진공 설치 완료 · SL2 = 전체 설치 완료</span></div>';
 
@@ -6178,6 +6235,7 @@ function renderSLSection(tableOnly) {
     + '<span style="flex:1;"></span><input type="search" placeholder="설비 · PM 검색" value="'+esc(_slQuery)+'" oninput="setSlQuery(this.value)" style="font-size:11px;padding:3px 6px;border:1px solid #ccc;border-radius:4px;width:150px;"></div>';
   h += '<div id="slTable">' + tableHtml() + '</div>';
   h += slGapHtml(esc);
+  h += eqIdReviewHtml(esc);
   h += '</div>';
   el.innerHTML = h;
   drawSlCurve(rows, today);
@@ -6230,6 +6288,61 @@ function slGapHtml(esc) {
         + (g.last ? ' <span style="color:#999;">' + g.last.slice(5) + ' (' + g.idle + '일)</span>' : '') + '</span>').join(' ')
       + '</span></div>';
   }
+  return h + '</div></details>';
+}
+
+// 설비 ID 대조 (엑셀 툴 ID 기준): 자동 정정된 이름 + 엑셀에 없는 시트 설비명(번호 차이·후보 여럿·후보 없음)
+let _eqRevOpen = false;
+function eqIdReview() {
+  const xl = xlToolIds(); if (!xl) return null;
+  const by = new Map();   // 원래 시트 설비명 → { n, last, w, v, to }
+  for (const r of (Array.isArray(_stored) ? _stored : [])) {
+    if (!r || !r.e) continue;
+    const raw = r.e0 !== undefined ? r.e0 : r.e;
+    if (r.e0 === undefined && xl.has(r.e)) continue;
+    if (!by.has(raw)) by.set(raw, { n: 0, last: '', w: '', v: '', to: r.e0 !== undefined ? r.e : '' });
+    const o = by.get(raw); o.n++;
+    if (r.d >= o.last) { o.last = r.d; o.w = r.w || ''; o.v = r.v || ''; }
+  }
+  const auto = [], review = [];
+  for (const [raw, o] of by) {
+    if (o.to) { auto.push(Object.assign({ raw }, o)); continue; }
+    const m = eqXlMatch(raw, xl);
+    const near = m.cands.length ? m.cands : [...xl].filter(t => t.slice(0, 6) === raw.slice(0, 6));
+    review.push(Object.assign({ raw, cands: near, type: !isValidEquip(raw) ? '형식 오류' : m.auto ? '문자 오기' : m.cands.length === 1 ? '번호 차이' : m.cands.length > 1 ? '후보 여럿' : near.length ? '같은 종류 다른 번호' : '엑셀에 없음' }, o));
+  }
+  auto.sort((a, b) => b.n - a.n); review.sort((a, b) => b.n - a.n);
+  const used = new Set((Array.isArray(_stored) ? _stored : []).map(r => r && r.e));
+  return { auto, review, xlUnused: [...xl].filter(t => !used.has(t)).sort() };
+}
+function eqIdReviewExport() {
+  const R = eqIdReview(); if (!R || typeof XLSX === 'undefined') return;
+  const a1 = [['시트 설비명', '정정된 엑셀 ID', '보고 건수', '마지막 보고일', '마지막 보고자', '업체']];
+  for (const o of R.auto) a1.push([o.raw, o.to, o.n, o.last, o.w, o.v]);
+  const a2 = [['시트 설비명', '구분', '엑셀 후보', '보고 건수', '마지막 보고일', '마지막 보고자', '업체', '올바른 ID(기입)']];
+  for (const o of R.review) a2.push([o.raw, o.type, o.cands.join(' / '), o.n, o.last, o.w, o.v, '']);
+  const a3 = [['시트 보고가 없는 엑셀 툴 ID']].concat(R.xlUnused.map(t => [t]));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(a1), '자동 정정');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(a2), '확인 필요');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(a3), '시트 보고 없는 툴');
+  XLSX.writeFile(wb, 'BBTECH_설비ID_대조_' + cstToday() + '.xlsx');
+}
+function eqIdReviewHtml(esc) {
+  const R = eqIdReview(); if (!R) return '';
+  const tc = {}; R.review.forEach(o => tc[o.type] = (tc[o.type] || 0) + 1);
+  const recN = R.auto.reduce((s, o) => s + o.n, 0);
+  let h = '<details '+(_eqRevOpen ? 'open' : '')+' ontoggle="_eqRevOpen=this.open" style="margin-top:8px;border:1px solid #ddd3f0;background:#faf8ff;border-radius:8px;padding:6px 10px;">'
+    + '<summary style="cursor:pointer;font-size:12px;font-weight:700;color:#4b2e83;">🔤 설비 ID 대조 (엑셀 툴 ID 기준) — 자동 정정 '+R.auto.length+'개 이름('+recN+'건) · 확인 필요 '+R.review.length+'개'
+    + ' <span style="font-weight:400;color:#7a68a8;">('+Object.entries(tc).map(([k, n]) => k + ' ' + n).join(' · ')+' · 시트 보고 없는 엑셀 툴 '+R.xlUnused.length+')</span></summary>'
+    + '<div style="display:flex;align-items:center;gap:8px;margin:6px 0;flex-wrap:wrap;"><span style="font-size:10px;color:#6b5a99;">엑셀 툴 ID를 정답으로 봅니다. 한 글자 문자 오기는 자동으로 합쳤고, 번호만 다르거나 후보가 여럿이면 다른 호기일 수 있어 그대로 두었습니다. 확인 필요 목록은 시트의 "설비명 수정"에서 바로잡을 수 있습니다.</span>'
+    + '<span style="flex:1;"></span><button onclick="eqIdReviewExport()" style="background:#1f7a3d;color:#fff;border:none;padding:3px 10px;border-radius:4px;font-size:11px;cursor:pointer;">엑셀 다운로드</button></div>'
+    + '<div style="display:flex;gap:12px;flex-wrap:wrap;">';
+  const tag = (o, right) => '<span style="white-space:nowrap;margin-right:10px;"><b>'+esc(o.raw)+'</b> → '+right+' <span style="color:#999;">'+o.n+'건 · '+esc(o.w)+'</span></span>';
+  h += '<div style="flex:1 1 380px;min-width:0;"><div style="font-size:11px;font-weight:700;color:#555;margin-bottom:3px;">확인 필요 '+R.review.length+'개 (보고 많은 순)</div><div style="max-height:300px;overflow:auto;font-size:11px;line-height:1.7;">'
+    + (R.review.length ? R.review.map(o => tag(o, '<span style="color:#7a68a8;">'+esc(o.type)+'</span> '+(o.cands.length ? esc(o.cands.slice(0, 4).join('/')) + (o.cands.length > 4 ? '…' : '') : '-'))).join(' ') : '<span style="color:#bbb;">없음</span>') + '</div></div>';
+  h += '<div style="flex:1 1 300px;min-width:0;"><div style="font-size:11px;font-weight:700;color:#555;margin-bottom:3px;">자동 정정 '+R.auto.length+'개</div><div style="max-height:300px;overflow:auto;font-size:11px;line-height:1.7;">'
+    + (R.auto.length ? R.auto.map(o => tag(o, '<b style="color:#1f7a3d;">'+esc(o.to)+'</b>')).join(' ') : '<span style="color:#bbb;">'+(_eqAliasOn ? '없음' : '꺼짐')+'</span>') + '</div></div>';
   return h + '</div></details>';
 }
 
