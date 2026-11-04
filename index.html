@@ -23,7 +23,7 @@ if (location.protocol === 'file:') {
 }
 </script>
 <script>
-window.BBTECH_BUILD = '2026-10-31.4';
+window.BBTECH_BUILD = '2026-11-03.1';
 if (typeof window.Chart === 'undefined') {
   window.Chart = class ChartFallback {
     constructor(ctx, config) {
@@ -2361,6 +2361,10 @@ const REVISIONS = [
     'TAT 공정 단계별 평균 소요일 재정의 — 가중 합산 평균값 대신 공종별 PRE/FINAL 보고값이 단계 하한을 처음 넘은 날로 계산해 PRE·FINAL 두 줄로 표시. 이전에는 실측이 PRE 14~29%, 품질이 FINAL 33~67% 구간으로 잡혔고, 완료(80%) 시점에서 계산을 멈춰 턴온이 항상 0일이었음. 진입일을 알 수 없는 단계(첫 보고에서 이미 넘었거나 한 번에 건너뜀)는 제외, 중앙값 함께 표시',
     '[.2] PRE에는 품질·턴온 단계가 없으므로 PRE는 착수전·실측·서포트·설치(30~100%)로만 구분 — 공정 단계 현황과 TAT 단계 소요일 모두. 품질·턴온은 FINAL에만 표시',
     '[.3] SL1+ / SL2 일정(계획 대비) 섹션 추가 — BBTech America Daily Report 엑셀의 설비별 SL1+·SL2 계획일과 세부공종 진척으로 완료·진행중·임박(7일 이내)·지연·미정 집계, 주별 계획 대비 누적 완료 추이, 지연·임박 설비 목록, 설비별 일정표(검색·상태 필터). SL1+ = Bulk Gas·PCW + 진공, SL2 = 전체. 완료는 엑셀 진척 100% 기준이고 시트 FINAL 진척을 함께 표시해 차이 나는 설비 표시. 일정 데이터는 sl-schedule.js(설비별 일정\\일정_가져오기.cmd로 생성)'
+  ]},
+  { date: '2026-11-03', items: [
+    'TAT 착수일에 공장(Taylor Shop) 제작 시작일 반영 — 외부 SHOP 공정율 파일의 설비×공종별 선작업 제작 시작일을 읽어(shop-schedule.js), 착수 = 현장 실측 10% 관측일과 제작 시작일 중 빠른 날. 첫 현장 보고 이전(같은 날 포함)에 제작이 시작된 설비는 관측 이전 착수·첫 보고 20%↑여도 착수를 아는 것으로 보고 평균에 포함. 공종별 TAT도 같은 기준. TAT 머리글 체크박스로 끌 수 있음',
+    '불완전 판정 수정 — 첫 보고일에 보고가 여럿이면 가장 낮은 진척으로 판정(같은 날 보고 순서에 따라 높은 값이 첫 보고로 잡혀 불완전으로 빠지던 문제)'
   ]},
   { date: '2026-10-31', items: [
     '엑셀 완료 보정 — 기술인 개별 보고는 FINAL 85~95%에서 마감(100%) 보고를 빠뜨리는 경우가 많아(엑셀 100%인 공종 505건 중 279건), Daily Report 엑셀 진척이 100%인 공종은 시트 값과 관계없이 PRE·FINAL 100%로 계산. 시공 완료·평균 진행률·공정 단계 현황 등 전체에 반영되며 SL 섹션의 체크박스로 끌 수 있음(브라우저별 저장). 원본 시트 보고는 바꾸지 않음. 단계 목록에 보정된 공종은 "(엑셀)" 표시',
@@ -5538,6 +5542,17 @@ let _tatShowCensored = true;
 const TAT_CENSOR_P = 0.20;   // 첫 보고가 이 값 이상이면 실측 착수(10%)를 놓친 것으로 봄
 function setTatObsStart(v){ _tatObsStart = v || ''; try { localStorage.setItem(TAT_OBS_KEY, _tatObsStart); } catch(e){} renderTATSection(); }
 function setTatShowCensored(b){ _tatShowCensored = b; renderTATSection(); }
+const TAT_SHOP_KEY = 'bbtech_tat_shop';
+let _tatShop = (function(){ try { return localStorage.getItem(TAT_SHOP_KEY) !== '0'; } catch(e){ return true; } })();
+function setTatShop(b){ _tatShop = !!b; try { localStorage.setItem(TAT_SHOP_KEY, _tatShop ? '1' : '0'); } catch(e){} renderTATSection(); }
+function loadShopSchedule() {   // 외부 SHOP 제작 일정 (외부 SHOP 공정율\제작일정_가져오기.cmd 가 생성)
+  const s = document.createElement('script');
+  s.src = 'shop-schedule.js?_bb=' + Date.now();
+  s.onload = () => { try { renderTATSection(); } catch (e) { console.error('shop', e); } };
+  s.onerror = () => console.warn('shop-schedule.js 없음 — TAT는 현장 관측 착수만 사용');
+  document.head.appendChild(s);
+}
+window.addEventListener('load', loadShopSchedule);
 function setTatStartOverride(eq, date){
   if (date) _tatStartOvr[eq] = date; else delete _tatStartOvr[eq];
   try { localStorage.setItem(TAT_OVR_KEY, JSON.stringify(_tatStartOvr)); } catch(e){}
@@ -5548,6 +5563,7 @@ function setTatStartOverride(eq, date){
 function computeTAT() {
   const recs = (Array.isArray(_stored)?_stored:[]).filter(r => isValidEquip(r.e) && typeof r.p === 'number' && r.c !== '용접사');
   const today = cstToday();
+  const shopT = _tatShop && window.BB_SHOP && window.BB_SHOP.tools ? window.BB_SHOP.tools : null;
   const byEq = new Map();
   for (const r of recs) { const c = catOfR(r); if (!c) continue; if (!byEq.has(r.e)) byEq.set(r.e, { v:r.v||'', rs:[] }); byEq.get(r.e).rs.push({ d:r.d, c, p:r.p, ph:r.ph||'' }); }
   const equips = [];
@@ -5555,11 +5571,17 @@ function computeTAT() {
     const rs = o.rs.slice().sort((a,b) => a.d < b.d ? -1 : a.d > b.d ? 1 : 0);
     let rawStart = null; for (const r of rs) if (r.p >= TAT_START) { rawStart = r.d; break; }
     if (!rawStart) continue;                       // 실측 착수 전
-    const firstDate = rs[0].d, firstP = rs[0].p;
-    const ovr = _tatStartOvr[eq] || null;
-    const start = ovr || rawStart;
-    const censored = ovr ? false : ((_tatObsStart && firstDate <= _tatObsStart) || firstP >= TAT_CENSOR_P);
+    const firstDate = rs[0].d;
+    const firstP = Math.min(...rs.filter(r => r.d === firstDate).map(r => r.p));   // 같은 날 보고가 여럿이면 가장 낮은 값 (정렬 순서에 따라 높은 값이 잡히던 문제)
     const cats = [...new Set(rs.map(r => r.c))];
+    // [2026-11-03] 공장(Taylor Shop) 제작 시작일: 착수 = 현장 관측(실측 10%)과 공종별 제작 시작일 중 빠른 날
+    const shopOf = c => { const t = shopT && shopT[eq]; const o = t && (t[c] || t[normalizeCategory(c)]); return o && o.ps ? o.ps : null; };
+    const shopMin = cats.map(shopOf).filter(Boolean).sort()[0] || null;
+    const ovr = _tatStartOvr[eq] || null;
+    const start = ovr || (shopMin && shopMin < rawStart ? shopMin : rawStart);
+    const startSrc = ovr ? '보정' : (shopMin && shopMin < rawStart ? '제작' : '현장');
+    // 불완전 = 실제 착수를 놓침. 단, 첫 현장 보고 이전(같은 날 포함)의 제작 시작일이 있으면 착수를 아는 것으로 본다
+    const censored = ovr ? false : (((_tatObsStart && firstDate <= _tatObsStart) || firstP >= TAT_CENSOR_P) && !(shopMin && shopMin <= firstDate));
     const catCount = {}; for (const r of rs) catCount[r.c] = (catCount[r.c]||0)+1;
     const domCat = Object.entries(catCount).sort((a,b) => b[1]-a[1])[0][0];
     const dates = [...new Set(rs.map(r => r.d))].sort();
@@ -5586,10 +5608,12 @@ function computeTAT() {
         if (cs != null && ce == null && wv >= TAT_DONE - TAT_EPS) ce = r.d;
       }
       const cdone = ce != null;
+      const sp = shopOf(c), csrc = cs && sp && sp < cs ? '제작' : '현장';
+      if (cs && sp && sp < cs) cs = sp;
       const ctat = cs ? _ddG(cs, cdone ? ce : today) : null;
-      if (cs) eqCells.push({ c, cs, ce, done:cdone, tat:ctat, cur:Math.round(cw()*100) });
+      if (cs) eqCells.push({ c, cs, ce, done:cdone, tat:ctat, cur:Math.round(cw()*100), src:csrc });
     }
-    equips.push({ eq, v:o.v, cat:domCat, start, end, done, tat, ongoing:!done, censored, ovr:!!ovr, cells:eqCells, stageDur:sd });
+    equips.push({ eq, v:o.v, cat:domCat, start, startSrc, shopStart:shopMin, end, done, tat, ongoing:!done, censored, ovr:!!ovr, cells:eqCells, stageDur:sd });
   }
   return { equips, today };
 }
@@ -5661,7 +5685,7 @@ function openTatModal(eq){
   const e = d.equips.find(x => x.eq === eq); if (!e) return;
   const esc = (s) => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   document.getElementById('hmModalTitle').textContent = eq + ' — TAT 상세';
-  document.getElementById('hmModalSub').textContent = (e.v||'') + ' · 착수 ' + e.start + (e.ovr?'(보정)':'') + ' · ' + (e.done ? ('완료 ' + e.end + ' · TAT ' + e.tat + '일') : ('진행중 · 경과 ' + e.tat + '일')) + (e.censored ? ' · ⚠ 관측 이전 착수(불완전)' : '');
+  document.getElementById('hmModalSub').textContent = (e.v||'') + ' · 착수 ' + e.start + (e.ovr?'(보정)':e.startSrc==='제작'?'(공장 제작 시작)':'') + (e.shopStart && e.startSrc!=='제작' ? ' · 공장 제작 시작 ' + e.shopStart : '') + ' · ' + (e.done ? ('완료 ' + e.end + ' · TAT ' + e.tat + '일') : ('진행중 · 경과 ' + e.tat + '일')) + (e.censored ? ' · ⚠ 관측 이전 착수(불완전)' : '');
   let h = '';
   if (e.censored || e.ovr) {
     h += '<div style="background:#fff8ec;border:1px solid #f0dcae;border-radius:6px;padding:8px 10px;margin-bottom:10px;font-size:11px;color:#7a5c00;">'
@@ -5879,10 +5903,13 @@ function renderTATSection() {
   if (_tatCat !== 'ALL' && !catsPresent.includes(_tatCat)) _tatCat = 'ALL';
   const sel = _tatCat === 'ALL' ? d.equips : d.equips.filter(e => e.cat === _tatCat);
   const agg = tatAgg(sel);
+  const shopOn = _tatShop && !!window.BB_SHOP;
+  const shopN = d.equips.filter(e => e.shopStart).length;
   let h = '<div style="border:1px solid #e5e7eb;border-radius:10px;padding:12px 14px;background:#fff;">';
   h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap;"><span style="font-size:13px;font-weight:800;color:#222;">⏱️ TAT 분석 (Turn Around Time)</span>'
-    + '<span style="font-size:11px;color:#888;">착수=실측 10%↑ · 완료=모든 공종 80%↑</span>'
+    + '<span style="font-size:11px;color:#888;">착수=현장 실측 10%↑'+(shopOn ? ' 또는 공장 제작 시작일 중 빠른 날' : '')+' · 완료=모든 공종 80%↑</span>'
     + '<span style="flex:1;"></span>'
+    + (window.BB_SHOP ? '<label title="외부 SHOP 공정율 파일의 공종별 제작 시작일(선작업)을 착수일 후보로 사용. 첫 현장 보고 이전에 제작이 시작됐으면 관측 이전 착수여도 불완전에서 제외" style="font-size:11px;color:#1f6f8b;cursor:pointer;font-weight:600;"><input type="checkbox" '+(_tatShop?'checked':'')+' onchange="setTatShop(this.checked)" style="vertical-align:middle;"> 공장 제작 시작일 반영 <span style="font-weight:400;color:#888;">('+esc(window.BB_SHOP.asOf)+' · '+shopN+'대)</span></label>' : '')
     + '<span style="font-size:11px;color:#666;">관측 시작</span>'
     + '<input type="date" value="'+_tatObsStart+'" onchange="setTatObsStart(this.value)" style="font-size:11px;padding:2px 4px;border:1px solid #ccc;border-radius:4px;">'
     + '<label style="font-size:11px;color:#666;cursor:pointer;"><input type="checkbox" '+(_tatShowCensored?'checked':'')+' onchange="setTatShowCensored(this.checked)" style="vertical-align:middle;"> 불완전 표시</label>'
@@ -5899,7 +5926,7 @@ function renderTATSection() {
   h += '<div style="font-size:11px;color:#555;margin-bottom:4px;">'+(_tatCat==='ALL'?'':'<b style="color:'+(TAT_CATCOLOR[_tatCat]||'#333')+';">['+esc(_tatCat)+'] </b>')
     + '완료 <b>'+agg.doneN+'대</b> (평균 TAT <b>'+Math.round(agg.avgDone)+'일</b>) · 진행중 <b>'+agg.ongoingN+'대</b> (평균 경과 '+Math.round(agg.avgOng)+'일)'
     + (agg.censoredN ? ' · <span style="color:#b26a00;">불완전 '+agg.censoredN+'대(관측 이전 착수 → 평균 제외)</span>' : '') + '</div>';
-  h += '<div style="font-size:10px;color:#aaa;margin-bottom:10px;">※ 관측 시작일('+_tatObsStart+') 이전에 착수했거나 첫 보고가 이미 '+Math.round(TAT_CENSOR_P*100)+'%↑인 설비는 실제 착수를 놓쳐 TAT가 짧게 계산됨 → 평균에서 제외하고 ‹ 로 표시. 실제 착수일을 알면 막대 클릭 후 보정 가능.</div>';
+  h += '<div style="font-size:10px;color:#aaa;margin-bottom:10px;">※ 관측 시작일('+_tatObsStart+') 이전에 착수했거나 첫 보고가 이미 '+Math.round(TAT_CENSOR_P*100)+'%↑인 설비는 실제 착수를 놓쳐 TAT가 짧게 계산됨 → 평균에서 제외하고 ‹ 로 표시'+(shopOn ? ' (첫 현장 보고 이전의 공장 제작 시작일이 있으면 그 날을 착수로 보고 포함 — 착수가 제작인 설비 '+d.equips.filter(e => e.startSrc === '제작').length+'대)' : '')+'. 실제 착수일을 알면 막대 클릭 후 보정 가능.</div>';
 
   // 공정 단계별 평균 소요일 (실측→서포트→설치→품질→턴온)
   h += '<div style="font-size:12px;font-weight:700;color:#555;margin:6px 0 5px;">공정 단계별 평균 소요일 <span style="font-weight:400;color:#aaa;">(공종별 보고값 기준 · 단계 진입일을 관측한 구간만 · 단위 = 공종 셀)</span></div>';
