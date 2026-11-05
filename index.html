@@ -23,7 +23,7 @@ if (location.protocol === 'file:') {
 }
 </script>
 <script>
-window.BBTECH_BUILD = '2026-11-05.1';
+window.BBTECH_BUILD = '2026-11-05.2';
 if (typeof window.Chart === 'undefined') {
   window.Chart = class ChartFallback {
     constructor(ctx, config) {
@@ -506,6 +506,10 @@ document.addEventListener('visibilitychange', () => {
   <div class="filter-bar">
     <label>업체</label>
     <select id="filterVendor"><option value="">전체</option></select>
+    <label title="Daily Report BB_List 시트 D열(Capa)">공사</label>
+    <select id="filterCapa"><option value="">전체</option><option value="1PATH">1PATH (1차)</option><option value="10K">10K (2차)</option><option value="NONE">미분류</option></select>
+    <label title="Daily Report BB_List 시트 E열(PRC)">PRC</label>
+    <select id="filterPrc"><option value="">전체</option><option value="Main">Main</option><option value="Aux">Aux</option><option value="Infra">Infra</option><option value="NONE">미분류</option></select>
     <label>공종</label>
     <select id="filterCategory"><option value="">전체</option></select>
     <label>설비</label>
@@ -2485,6 +2489,7 @@ function effSectionHtml() {
 // ── 수정 이력 (최신순) ──────────────────────────────────────────────
 const REVISIONS = [
   { date: '2026-11-05', items: [
+    '[.2] 상단 필터에 공사·PRC 추가 — Daily Report "BB_List" 시트 D열(Capa: 1PATH = 1차 공사, 10K = 2차 공사)과 E열(PRC: Main/Aux/Infra) 기준, 기본값 전체. KPI·공종/업체 차트·공정 단계 현황·TAT·SL1+/SL2 일정에 함께 적용(TAT·SL 제목에 적용 중인 필터 표시). BB_List에 없는 설비명은 "미분류", 설비명 없는 보고는 공사·PRC를 고르면 빠짐. 공사·PRC 값은 sl-schedule.js(일정_가져오기)에 함께 생성',
     '미제출자 명단에 통합근무현황 파일 지원 — "통합근무현황" 시트에서 구분(G열)이 배관·용접사인 인원만 제출 대상(D=협력사, K=성명, CU=Daily Report e-mail). 입사일(CH열)+3일부터 미제출 판정, 그 전 작업일은 세지 않고 기간 내 판정일이 없으면 "입사 3일 유예"로 따로 표시. 엑셀 내보내기에 입사일·판정 시작일 추가(날짜별 매트릭스는 판정 전 "-")',
     '미제출자 창에 "📁 폴더에서 최신 명단" 추가 — 통합근무현황 폴더를 한 번 고르면 기억하고, 파일명 날짜(YY.MM.DD)가 가장 늦은 파일로 명단 교체. 권한이 유지된 상태면 창을 열 때 새 파일을 자동 반영(Chrome·Edge). 명단은 브라우저에만 저장되며 서버로 올라가지 않음',
   ]},
@@ -4716,6 +4721,7 @@ function displayProgressCellHTML(r) {
 
 const state = {
   vendor: '', category: '', equip: '', worker: '',
+  capa: '', prc: '',   // [2026-11-05] BB_List 공사(1PATH/10K)·PRC(Main/Aux/Infra) 필터
   year: '',
   dateStart: '', dateEnd: '',
   view: 'main', detailKey: ''
@@ -5192,6 +5198,9 @@ function setupFilters() {
   document.getElementById('recordTotal').textContent = records.length;
 
   vendorSel.addEventListener('change', e => { state.vendor = e.target.value; render(); });
+  const capaSel = document.getElementById('filterCapa'), prcSel = document.getElementById('filterPrc');
+  capaSel.addEventListener('change', e => { state.capa = e.target.value; render(); });
+  prcSel.addEventListener('change',  e => { state.prc = e.target.value; render(); });
   catSel.addEventListener('change',    e => { state.category = e.target.value; render(); });
   yearSel.addEventListener('change',   e => { state.year = e.target.value; render(); });
   ds.addEventListener('change',        e => { state.dateStart = e.target.value; render(); });
@@ -5237,6 +5246,7 @@ function setupFilters() {
 
   document.getElementById('filterReset').addEventListener('click', () => {
     state.vendor = ''; state.category = ''; state.equip = ''; state.worker = '';
+    state.capa = ''; state.prc = ''; capaSel.value = ''; prcSel.value = '';
     state.year = '';
     state.dateStart = ''; state.dateEnd = '';
     state.view = 'main'; state.detailKey = '';
@@ -5297,12 +5307,32 @@ function setupCombo(input, panel, itemsFn, onCommit) {
   });
 }
 
+// [2026-11-05] 공사·PRC 필터 — Daily Report 'BB_List' 시트(sl-schedule.js의 bbList: 툴 ID → [공사, PRC]) 기준.
+//  설비명이 BB_List에 없으면 '미분류'. 설비명이 없는 보고(일반 작업 등)는 공사·PRC 필터를 걸면 빠진다.
+function bbListOf(eq) {
+  const L = window.BB_SL_SCHEDULE && window.BB_SL_SCHEDULE.bbList;
+  return (L && eq) ? (L[String(eq).toUpperCase()] || null) : null;
+}
+function bbPassFilter(eq) {
+  if (!state.capa && !state.prc) return true;
+  const b = bbListOf(eq);
+  if (state.capa && (b ? b[0] : 'NONE') !== state.capa) return false;
+  if (state.prc && (b && b[1] ? b[1] : 'NONE') !== state.prc) return false;
+  return true;
+}
+function bbFilterLabel() {
+  const a = [];
+  if (state.capa) a.push(state.capa === 'NONE' ? '공사 미분류' : state.capa);
+  if (state.prc) a.push(state.prc === 'NONE' ? 'PRC 미분류' : state.prc);
+  return a.join(' · ');
+}
 function applyFilter(...except) {
   const ex = new Set(except);
   const equipQuery = state.equip.trim().toLowerCase();
   const workerQuery = state.worker.trim().toLowerCase();
   return records.filter(r => {
     if (!ex.has('vendor')   && state.vendor   && r.v !== state.vendor)   return false;
+    if ((state.capa || state.prc) && !bbPassFilter(r.e)) return false;
     if (!ex.has('category') && state.category && normalizeCategory(r.c) !== state.category) return false;
     if (!ex.has('equip') && equipQuery) {
       if (!isValidEquip(r.e)) return false;
@@ -5696,7 +5726,7 @@ function setTatStartOverride(eq, date){
   if (ov && ov.style.display === 'flex') openTatModal(eq);
 }
 function computeTAT() {
-  const recs = (Array.isArray(_stored)?_stored:[]).filter(r => isValidEquip(r.e) && typeof r.p === 'number' && r.c !== '용접사');
+  const recs = (Array.isArray(_stored)?_stored:[]).filter(r => isValidEquip(r.e) && typeof r.p === 'number' && r.c !== '용접사' && bbPassFilter(r.e));   // [2026-11-05] 공사·PRC 필터 반영
   const today = cstToday();
   const shopT = _tatShop && window.BB_SHOP && window.BB_SHOP.tools ? window.BB_SHOP.tools : null;
   const byEq = new Map();
@@ -6041,7 +6071,7 @@ function renderTATSection() {
   const shopOn = _tatShop && !!window.BB_SHOP;
   const shopN = d.equips.filter(e => e.shopStart).length;
   let h = '<div style="border:1px solid #e5e7eb;border-radius:10px;padding:12px 14px;background:#fff;">';
-  h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap;"><span style="font-size:13px;font-weight:800;color:#222;">⏱️ TAT 분석 (Turn Around Time)</span>'
+  h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap;"><span style="font-size:13px;font-weight:800;color:#222;">⏱️ TAT 분석 (Turn Around Time)</span>'+(bbFilterLabel() ? '<span style="font-size:11px;background:#e8f1fb;color:#1f6f8b;border-radius:10px;padding:1px 8px;font-weight:700;">'+bbFilterLabel()+'</span>' : '')
     + '<span style="font-size:11px;color:#888;">착수=현장 실측 10%↑'+(shopOn ? ' 또는 공장 제작 시작일 중 빠른 날' : '')+' · 완료=모든 공종 80%↑</span>'
     + '<span style="flex:1;"></span>'
     + (window.BB_SHOP ? '<label title="외부 SHOP 공정율 파일의 공종별 제작 시작일(선작업)을 착수일 후보로 사용. 첫 현장 보고 이전에 제작이 시작됐으면 관측 이전 착수여도 불완전에서 제외" style="font-size:11px;color:#1f6f8b;cursor:pointer;font-weight:600;"><input type="checkbox" '+(_tatShop?'checked':'')+' onchange="setTatShop(this.checked)" style="vertical-align:middle;"> 공장 제작 시작일 반영 <span style="font-weight:400;color:#888;">('+esc(window.BB_SHOP.asOf)+' · '+shopN+'대)</span></label>' : '')
@@ -6278,9 +6308,9 @@ function renderSLSection(tableOnly) {
       const k = String(eq).toUpperCase(), x = xlBy.get(k);
       base.push(x ? Object.assign({}, x, { raw: eq, vendor: v }) : { t: k, raw: eq, vendor: v, prc: '', pm: '', p: {}, noXl: true });
     }
-  } else base = S.tools.map(t => Object.assign({ raw: t.t }, t));
+  } else base = S.tools.filter(t => bbPassFilter(t.t)).map(t => Object.assign({ raw: t.t }, t));
   const inUni = new Set(base.map(t => t.t));
-  const xlOnly = S.tools.filter(t => !inUni.has(String(t.t).toUpperCase())).map(t => t.t);
+  const xlOnly = S.tools.filter(t => !inUni.has(String(t.t).toUpperCase()) && bbPassFilter(t.t)).map(t => t.t);
   const nXl = base.filter(t => !t.noXl).length;
   const rows = base.map(t => ({ t, ev: { SL1p: slEval(t, 'SL1p', today, sheet), SL2: slEval(t, 'SL2', today, sheet) } }));
   const M = SL_MS[_slMs];
@@ -6339,7 +6369,7 @@ function renderSLSection(tableOnly) {
   if (tableOnly === true) { const tb = document.getElementById('slTable'); if (tb) { tb.innerHTML = tableHtml(); return; } }
 
   let h = '<div style="border:1px solid #e5e7eb;border-radius:10px;padding:12px 14px;background:#fff;">';
-  h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;"><span style="font-size:13px;font-weight:800;color:#222;">📅 SL1+ / SL2 일정 (계획 대비)</span>'
+  h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;"><span style="font-size:13px;font-weight:800;color:#222;">📅 SL1+ / SL2 일정 (계획 대비)</span>'+(bbFilterLabel() ? '<span style="font-size:11px;background:#e8f1fb;color:#1f6f8b;border-radius:10px;padding:1px 8px;font-weight:700;">'+bbFilterLabel()+'</span>' : '')
     + '<span style="font-size:11px;color:#888;">Daily Report '+esc(S.reportDate)+' 기준'+(S.workDate ? ' (작업일 '+esc(S.workDate)+')' : '')+' · 시트 설비 <b>'+rows.length+'대</b> (엑셀 일정 있음 '+nXl+' · 일정 없음 '+(rows.length - nXl)+')'
     + (xlOnly.length ? ' · <span title="'+esc(xlOnly.join(' '))+'" style="cursor:help;text-decoration:underline dotted;">엑셀에만 있는 툴 '+xlOnly.length+'대 제외</span>' : '') + ' · 오늘 '+today+'</span>'
     + '<span style="flex:1;"></span>'
