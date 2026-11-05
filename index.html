@@ -23,7 +23,7 @@ if (location.protocol === 'file:') {
 }
 </script>
 <script>
-window.BBTECH_BUILD = '2026-11-03.1';
+window.BBTECH_BUILD = '2026-11-05.1';
 if (typeof window.Chart === 'undefined') {
   window.Chart = class ChartFallback {
     constructor(ctx, config) {
@@ -1342,7 +1342,56 @@ let _roster = (function(){ try { const s = localStorage.getItem(ROSTER_KEY); ret
 const _normName = (s) => String(s||'').replace(/\s+/g,'').trim();
 const _isLeft = (s) => /퇴사|퇴직|resign|inactive|비활성|exit|종료/i.test(String(s||''));
 
+// [2026-11-05] 통합근무현황 파일: '통합근무현황' 시트에서 G열(구분)=배관·용접사만 제출 대상.
+// D=소속(협력사), K=성명, CH=입사일, CU=Daily Report e-mail. 입사일+3일부터 미제출 판정.
+const ROSTER_TARGET_ROLES = /^(배관|용접사)$/;
+const ROSTER_GRACE_DAYS = 3;
+let _rosterMeta = (function(){ try { const s = localStorage.getItem('bbtech_roster_meta'); return s ? JSON.parse(s) : null; } catch(e){ return null; } })();
+function saveRosterMeta(m) { _rosterMeta = m; try { localStorage.setItem('bbtech_roster_meta', JSON.stringify(m)); } catch(e){} }
+function _rosterDateStr(v) {
+  if (v == null || v === '') return '';
+  if (typeof v === 'number' && isFinite(v) && typeof XLSX !== 'undefined') {
+    const p = XLSX.SSF.parse_date_code(v); if (!p) return '';
+    return p.y + '-' + String(p.m).padStart(2,'0') + '-' + String(p.d).padStart(2,'0');
+  }
+  if (v instanceof Date && !isNaN(v)) return v.getFullYear() + '-' + String(v.getMonth()+1).padStart(2,'0') + '-' + String(v.getDate()).padStart(2,'0');
+  const m = String(v).trim().match(/^(\d{2,4})[-./](\d{1,2})[-./](\d{1,2})/);
+  if (!m) return '';
+  const y = m[1].length === 2 ? '20' + m[1] : m[1];
+  return y + '-' + m[2].padStart(2,'0') + '-' + m[3].padStart(2,'0');
+}
+// 제출 의무 시작일 (입사일 + 3일). 입사일 없으면 '' = 제한 없음
+function _rosterDueFrom(p) { return (p && p.j) ? addDaysStr(p.j, ROSTER_GRACE_DAYS) : ''; }
+function parseIntegratedRosterWB(wb) {
+  const ws = wb.Sheets['통합근무현황'];
+  if (!ws) return null;
+  const rows = XLSX.utils.sheet_to_json(ws, { header:1, defval:'', raw:true });
+  const col = (l) => XLSX.utils.decode_col(l);
+  const ci = { v: col('D'), role: col('G'), name: col('K'), join: col('CH'), email: col('CU') };
+  // 열이 밀린 경우 대비: 머리글 행(성명·입사일)에서 이름으로 다시 찾음
+  for (let i=0;i<Math.min(rows.length,10);i++){
+    const line = (rows[i]||[]).map(x => String(x).replace(/\s+/g,''));
+    if (!line.includes('성명') || !line.includes('입사일')) continue;
+    const at = (re, cur) => re.test(line[cur]||'') ? cur : line.findIndex(c => re.test(c));
+    ci.v = at(/^소속$/, ci.v); ci.role = at(/^구분$/, ci.role); ci.name = at(/^성명$/, ci.name);
+    ci.join = at(/^입사일$/, ci.join); ci.email = at(/dailyreport/i, ci.email);
+    break;
+  }
+  const out = [];
+  for (const r of rows) {
+    const role = String(r[ci.role]||'').trim();
+    if (!ROSTER_TARGET_ROLES.test(role)) continue;
+    const name = String(r[ci.name]||'').trim();
+    const email = ci.email>=0 ? String(r[ci.email]||'').trim().toLowerCase() : '';
+    if (!name && !email) continue;
+    const vraw = String(r[ci.v]||'').trim();
+    out.push({ v: _vendor(vraw) || vraw || '미지정', vf: vraw, name, email, left: false, j: ci.join>=0 ? _rosterDateStr(r[ci.join]) : '', role });
+  }
+  return out;
+}
 function parseRosterWB(wb) {
+  const integ = parseIntegratedRosterWB(wb);
+  if (integ) return integ;
   const ws = wb.Sheets[wb.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(ws, { header:1, defval:'' });
   if (!rows.length) return [];
@@ -1353,7 +1402,7 @@ function parseRosterWB(wb) {
   }
   const hdr = rows[hi].map(x => String(x).trim().toLowerCase());
   const find = (...keys) => { for (let j=0;j<hdr.length;j++) for (const k of keys) if (hdr[j].includes(k)) return j; return -1; };
-  const ci = { v: find('업체','소속','협력사','vendor'), name: find('이름','성함','name'), email: find('이메일','메일','email'), status: find('상태','재직','퇴사','status') };
+  const ci = { v: find('업체','소속','협력사','vendor'), name: find('이름','성함','name'), email: find('이메일','메일','email'), status: find('상태','재직','퇴사','status'), join: find('입사'), role: find('구분') };
   const out = [];
   for (let i=hi+1;i<rows.length;i++){
     const r = rows[i];
@@ -1362,7 +1411,7 @@ function parseRosterWB(wb) {
     const vraw = ci.v>=0 ? String(r[ci.v]||'').trim() : '';
     const st = ci.status>=0 ? String(r[ci.status]||'').trim() : '';
     if (!name && !email) continue;
-    out.push({ v: _vendor(vraw) || vraw || '미지정', vf: vraw, name, email, left: _isLeft(st) });
+    out.push({ v: _vendor(vraw) || vraw || '미지정', vf: vraw, name, email, left: _isLeft(st), j: ci.join>=0 ? _rosterDateStr(r[ci.join]) : '', role: ci.role>=0 ? String(r[ci.role]||'').trim() : '' });
   }
   return out;
 }
@@ -1474,8 +1523,10 @@ function openRosterCheckModal() {
   if (!_roster.length) {
     document.getElementById('hmModalSub').textContent = '등록된 명단이 없습니다';
     document.getElementById('hmModalBody').innerHTML = '<div style="font-size:13px;color:#555;padding:10px 0;">상단 <b>👥 명단 업로드</b> 버튼으로 명단(.xlsx/.csv)을 올리거나, 아래에서 직접 입력할 수 있습니다.<br><br>열 이름에 <b>업체/소속</b>, <b>이름/성함</b>, <b>이메일</b>이 포함돼 있으면 자동 인식합니다.</div>'
+      + '<button onclick="loadRosterFromFolder()" style="background:#1f6f8b;color:#fff;border:none;padding:7px 16px;border-radius:5px;font-size:12px;cursor:pointer;margin-right:6px;">📁 통합근무현황 폴더에서 불러오기</button>'
       + '<button onclick="openRosterEditModal()" style="background:#1f7a3d;color:#fff;border:none;padding:7px 16px;border-radius:5px;font-size:12px;cursor:pointer;">✏️ 직접 입력</button>';
     document.getElementById('hmModalOverlay').style.display = 'flex';
+    _rosterAutoRefresh();
     return;
   }
   const a = document.getElementById('dcDateA'), b = document.getElementById('dcDateB');
@@ -1505,19 +1556,23 @@ function openRosterCheckModal() {
   for (const p of activeRoster) { const n = _normName(p.name); if (n) nameCount[n] = (nameCount[n]||0) + 1; }
 
   // 사람별: 보고한 날 / 미제출한 날 계산 (재직자만)
-  const submitted = [], missing = [];
+  const submitted = [], missing = [], grace = [];
   for (const p of activeRoster) {
     const pe = p.email, pn = _normName(p.name);
     const isDup = pn && nameCount[pn] >= 2;       // 동명이인 → 이름 보조 사용 안 함
     const missDates = [];
     let anyReport = false;
-    for (const d of workdays) {
+    // [2026-11-05] 입사일 + 3일 이전 작업일은 판정하지 않음
+    const dueFrom = _rosterDueFrom(p);
+    const myDays = dueFrom ? workdays.filter(d => d >= dueFrom) : workdays;
+    if (!myDays.length) { grace.push({ ...p, dueFrom }); continue; }
+    for (const d of myDays) {
       const byEmail = pe && byDateEmail.get(d).has(pe);
       const byName  = !isDup && pn && byDateName.get(d).has(pn);   // 동명이인이면 이름 매칭 제외
       const repd = byEmail || byName;
       if (repd) anyReport = true; else missDates.push(d);
     }
-    const rec = { ...p, missDates, missCount: missDates.length, workdayN: workdays.length, dup: isDup };
+    const rec = { ...p, dueFrom, missDates, missCount: missDates.length, workdayN: myDays.length, dup: isDup };
     if (anyReport && missDates.length === 0) submitted.push(rec);
     else missing.push(rec);   // 한 번이라도 빠진 사람 = 미제출 목록(어느 날 빠졌는지 포함)
   }
@@ -1525,7 +1580,7 @@ function openRosterCheckModal() {
   missing.sort((x,y) => y.missCount - x.missCount);
   const periodTxt = (pStart===pEnd) ? pStart : (pStart + ' ~ ' + pEnd);
   document.getElementById('hmModalSub').textContent =
-    '기간 ' + periodTxt + ' · 작업일 ' + workdays.length + '일' + sunTxt + ' · 재직 ' + activeRoster.length + '명' + (leftCount ? ' (퇴사 ' + leftCount + '명 제외)' : '') + ' · 전일제출 ' + submitted.length + '명 · 미제출(일부 포함) ' + missing.length + '명';
+    '기간 ' + periodTxt + ' · 작업일 ' + workdays.length + '일' + sunTxt + ' · 재직 ' + activeRoster.length + '명' + (leftCount ? ' (퇴사 ' + leftCount + '명 제외)' : '') + (grace.length ? ' · 입사 ' + ROSTER_GRACE_DAYS + '일 유예 ' + grace.length + '명' : '') + ' · 전일제출 ' + submitted.length + '명 · 미제출(일부 포함) ' + missing.length + '명';
 
   // 업체별 미제출 그룹
   const byV = {};
@@ -1539,6 +1594,7 @@ function openRosterCheckModal() {
     + '<input type="date" id="rosEnd" value="'+pEnd+'" style="font-size:12px;padding:3px 5px;border:1px solid #ccc;border-radius:4px;">'
     + '<button onclick="(function(){_rosterStart=document.getElementById(\'rosStart\').value||null;_rosterEnd=document.getElementById(\'rosEnd\').value||null;openRosterCheckModal();})()" style="background:#1f6f8b;color:#fff;border:none;padding:4px 12px;border-radius:4px;font-size:12px;cursor:pointer;">조회</button>'
     + '<span style="flex:1;"></span>'
+    + '<button onclick="loadRosterFromFolder()" title="통합근무현황 폴더에서 가장 최신 파일을 읽어 명단 교체 (Chrome·Edge)" style="background:#fff;color:#374151;border:1px solid #ccc;padding:4px 10px;border-radius:4px;font-size:12px;cursor:pointer;">📁 폴더에서 최신 명단</button>'
     + '<button onclick="downloadRoster()" style="background:#fff;color:#374151;border:1px solid #ccc;padding:4px 10px;border-radius:4px;font-size:12px;cursor:pointer;">📥 명단 다운로드</button>'
     + '<button onclick="openRosterEditModal()" style="background:#fff;color:#374151;border:1px solid #ccc;padding:4px 10px;border-radius:4px;font-size:12px;cursor:pointer;">✏️ 명단 편집</button>'
     + '</div>';
@@ -1565,20 +1621,27 @@ function openRosterCheckModal() {
         const badge = allMiss ? '<span style="font-size:9px;background:#fdecec;color:#c0392b;border-radius:6px;padding:0 5px;margin-left:4px;">전일</span>' : '';
         const dupBadge = p.dup ? '<span style="font-size:9px;background:#eef2f7;color:#555;border-radius:6px;padding:0 5px;margin-left:4px;" title="동명이인 — 이메일로만 판정">동명이인·이메일</span>' : '';
         h += '<tr style="border-bottom:1px solid #f7f7f7;">'
-          + '<td style="padding:4px 6px;font-size:12px;font-weight:600;white-space:nowrap;">'+esc(p.name||'(이름없음)')+badge+dupBadge+'<div style="font-size:10px;color:#aaa;font-weight:400;">'+esc(p.email||'')+'</div></td>'
+          + '<td style="padding:4px 6px;font-size:12px;font-weight:600;white-space:nowrap;">'+esc(p.name||'(이름없음)')+badge+dupBadge+'<div style="font-size:10px;color:#aaa;font-weight:400;">'+esc(p.email||'(이메일 없음 · 이름으로 판정)')+(p.j ? ' · 입사 '+esc(p.j.slice(2))+(p.dueFrom && p.dueFrom > workdays[0] ? ' (판정 '+esc(p.dueFrom.slice(5))+'~)' : '') : '')+'</div></td>'
           + '<td style="padding:4px 6px;font-size:12px;font-weight:700;color:#c0392b;white-space:nowrap;">'+p.missCount+'/'+p.workdayN+'일</td>'
           + '<td style="padding:4px 6px;font-size:11px;color:#555;">'+esc(fmtDates(p.missDates))+'</td></tr>';
       }
       h += '</tbody></table></div>';
     }
   }
+  // 입사 3일 유예자 (기간 내 판정 대상 작업일 없음)
+  if (grace.length) {
+    h += '<div style="margin-top:12px;font-size:11px;color:#777;background:#f7f8fa;border-radius:6px;padding:6px 8px;"><b>입사 '+ROSTER_GRACE_DAYS+'일 유예 '+grace.length+'명</b> (입사일+'+ROSTER_GRACE_DAYS+'일부터 판정): '
+      + grace.map(p => esc((p.v||'')+' '+(p.name||'')) + '(' + esc((p.j||'').slice(5)) + ' 입사→' + esc((p.dueFrom||'').slice(5)) + '~)').join(', ') + '</div>';
+  }
   // 명단 관리 footer
   _missingCache = missing;
   _missingWorkdays = workdays;
-  h += '<div style="margin-top:14px;border-top:1px solid #f0f0f0;padding-top:8px;font-size:11px;color:#999;">명단 갱신: 상단 "👥 명단 업로드"로 새 파일을 올리면 교체됩니다. '
+  const metaTxt = _rosterMeta && _rosterMeta.file ? ('현재 명단: ' + esc(_rosterMeta.file) + ' (' + (_rosterMeta.count||_roster.length) + '명, ' + esc(_rosterMeta.loadedAt||'') + ' 반영). ') : '';
+  h += '<div style="margin-top:14px;border-top:1px solid #f0f0f0;padding-top:8px;font-size:11px;color:#999;">' + metaTxt + '명단 갱신: "📁 폴더에서 최신 명단" 또는 상단 "👥 명단 업로드"로 새 파일을 올리면 교체됩니다. 통합근무현황 파일은 구분(G열)이 배관·용접사인 인원만 대상, 입사일+'+ROSTER_GRACE_DAYS+'일부터 판정. '
     + '<a href="#" onclick="if(confirm(\'명단을 모두 삭제할까요?\')){_roster=[];saveRoster();openRosterCheckModal();}return false;" style="color:#c0392b;">명단 삭제</a></div>';
   document.getElementById('hmModalBody').innerHTML = h;
   document.getElementById('hmModalOverlay').style.display = 'flex';
+  _rosterAutoRefresh();
 }
 
 let _missingCache = [];
@@ -1591,8 +1654,8 @@ function exportMissingXlsx() {
   const pStart = _rosterStart || ((a && a.value) ? a.value : pEnd);
   const wb = XLSX.utils.book_new();
   // 시트1: 요약 (미제출 일수 + 미제출 날짜 나열)
-  const s1 = [['업체','이름','이메일','미제출 일수','대상 작업일(일요일 제외)','미제출 날짜']];
-  for (const p of _missingCache) s1.push([p.vf||p.v||'', p.name||'', p.email||'', p.missCount, p.workdayN, (p.missDates||[]).join(', ')]);
+  const s1 = [['업체','이름','이메일','입사일','판정 시작일(입사+'+ROSTER_GRACE_DAYS+'일)','미제출 일수','대상 작업일(일요일 제외)','미제출 날짜']];
+  for (const p of _missingCache) s1.push([p.vf||p.v||'', p.name||'', p.email||'', p.j||'', p.dueFrom||'', p.missCount, p.workdayN, (p.missDates||[]).join(', ')]);
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(s1), '미제출 요약');
   // 시트2: 날짜 x 사람 매트릭스 (O=제출 / X=미제출)
   const wd = _missingWorkdays || [];
@@ -1600,7 +1663,7 @@ function exportMissingXlsx() {
   const s2 = [head];
   for (const p of _missingCache) {
     const missSet = new Set(p.missDates||[]);
-    s2.push([p.vf||p.v||'', p.name||''].concat(wd.map(d => missSet.has(d) ? 'X' : 'O')));
+    s2.push([p.vf||p.v||'', p.name||''].concat(wd.map(d => (p.dueFrom && d < p.dueFrom) ? '-' : missSet.has(d) ? 'X' : 'O')));
   }
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(s2), '날짜별 매트릭스');
   XLSX.writeFile(wb, 'BBTECH_미제출자_'+pStart+'_'+pEnd+'.xlsx');
@@ -1698,10 +1761,75 @@ function exportMissingPng() {
 function downloadRoster() {
   if (typeof XLSX === 'undefined' || !_roster.length) { alert('내보낼 명단이 없습니다.'); return; }
   const wb = XLSX.utils.book_new();
-  const s = [['업체','이름','이메일','상태']];
-  for (const p of _roster) s.push([p.vf||p.v||'', p.name||'', p.email||'', p.left?'퇴사':'재직']);
+  const s = [['업체','이름','이메일','상태','구분','입사일']];
+  for (const p of _roster) s.push([p.vf||p.v||'', p.name||'', p.email||'', p.left?'퇴사':'재직', p.role||'', p.j||'']);
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(s), '명단');
   XLSX.writeFile(wb, 'BBTECH_명단.xlsx');
+}
+
+// [2026-11-05] 통합근무현황 폴더 연결: 폴더를 한 번 고르면 기억해 두고, 그 안의 최신 파일로 명단을 교체.
+// 최신 = 파일명의 YY.MM.DD 날짜가 가장 늦은 파일(없으면 수정 시각). 엑셀 임시파일(~$)은 무시.
+function _rosterIdb(mode, fn) {
+  return new Promise((res, rej) => {
+    const rq = indexedDB.open('bbtech_roster_dir', 1);
+    rq.onupgradeneeded = () => rq.result.createObjectStore('h');
+    rq.onerror = () => rej(rq.error);
+    rq.onsuccess = () => { const tx = rq.result.transaction('h', mode); const r = fn(tx.objectStore('h')); tx.oncomplete = () => res(r && r.result); tx.onerror = () => rej(tx.error); };
+  });
+}
+async function _rosterPickLatest(dir) {
+  let best = null;
+  for await (const [name, h] of dir.entries()) {
+    if (h.kind !== 'file' || name.startsWith('~$') || !/\.xlsx?$/i.test(name)) continue;
+    const f = await h.getFile();
+    const m = name.match(/(\d{2})\.(\d{2})\.(\d{2})(?!.*\d{2}\.\d{2}\.\d{2})/);
+    const key = (m ? '20'+m[1]+m[2]+m[3] : '00000000') + String(f.lastModified).padStart(15,'0');
+    if (!best || key > best.key) best = { key, f };
+  }
+  return best && best.f;
+}
+async function _rosterLoadFile(f) {
+  const wb = XLSX.read(new Uint8Array(await f.arrayBuffer()), { type:'array' });
+  const list = parseRosterWB(wb);
+  if (!list.length) throw new Error(f.name + ' 에서 명단을 읽지 못했습니다.');
+  _roster = list; saveRoster();
+  saveRosterMeta({ file: f.name, count: list.length, loadedAt: cstToday(), mtime: f.lastModified });
+  return list.length;
+}
+async function loadRosterFromFolder() {
+  if (!window.showDirectoryPicker) { alert('이 브라우저는 폴더 연결을 지원하지 않습니다 (Chrome·Edge 사용). "👥 명단 업로드"로 파일을 직접 올려 주세요.'); return; }
+  try {
+    let dir = null;
+    try { dir = await _rosterIdb('readonly', s => s.get('dir')); } catch(e) {}
+    if (dir && (await dir.requestPermission({ mode:'read' })) !== 'granted') dir = null;
+    if (!dir) {
+      alert('통합근무현황 폴더(D:\\클로드개발\\대시보드\\통합근무현황)를 선택하세요. 한 번 고르면 기억합니다.');
+      dir = await window.showDirectoryPicker({ id:'bbtechRoster', mode:'read' });
+      try { await _rosterIdb('readwrite', s => s.put(dir, 'dir')); } catch(e) {}
+    }
+    const f = await _rosterPickLatest(dir);
+    if (!f) { alert('폴더에 엑셀 파일이 없습니다.'); return; }
+    const n = await _rosterLoadFile(f);
+    alert(f.name + '\n명단 ' + n + '명 반영 (배관·용접사)');
+    openRosterCheckModal();
+  } catch (err) {
+    if (err && err.name === 'AbortError') return;
+    alert('폴더에서 명단 불러오기 실패: ' + (err && err.message || err));
+  }
+}
+// 미제출자 창을 열 때, 연결된 폴더에 권한이 살아 있고 더 새 파일이 있으면 자동 교체
+let _rosterAutoChecking = false;
+async function _rosterAutoRefresh() {
+  if (_rosterAutoChecking || !window.showDirectoryPicker || !window.indexedDB) return;
+  _rosterAutoChecking = true;
+  try {
+    const dir = await _rosterIdb('readonly', s => s.get('dir'));
+    if (!dir || (await dir.queryPermission({ mode:'read' })) !== 'granted') return;
+    const f = await _rosterPickLatest(dir);
+    if (!f || (_rosterMeta && _rosterMeta.file === f.name && _rosterMeta.mtime === f.lastModified)) return;
+    await _rosterLoadFile(f);
+    if (document.getElementById('hmModalOverlay').style.display === 'flex' && /미제출자/.test(document.getElementById('hmModalTitle').textContent)) openRosterCheckModal();
+  } catch(e) {} finally { _rosterAutoChecking = false; }
 }
 
 function _rosterEditRowHtml(p) {
@@ -1710,6 +1838,7 @@ function _rosterEditRowHtml(p) {
     + '<td style="padding:2px 4px;"><input class="re-v" value="'+_esc(p.vf||p.v||'')+'" style="width:100%;font-size:12px;padding:3px 4px;border:1px solid #ddd;border-radius:3px;box-sizing:border-box;'+(isLeft?'color:#999;':'')+'"></td>'
     + '<td style="padding:2px 4px;"><input class="re-n" value="'+_esc(p.name||'')+'" style="width:100%;font-size:12px;padding:3px 4px;border:1px solid #ddd;border-radius:3px;box-sizing:border-box;'+(isLeft?'color:#999;':'')+'"></td>'
     + '<td style="padding:2px 4px;"><input class="re-e" value="'+_esc(p.email||'')+'" style="width:100%;font-size:12px;padding:3px 4px;border:1px solid #ddd;border-radius:3px;box-sizing:border-box;'+(isLeft?'color:#999;':'')+'"></td>'
+    + '<td style="padding:2px 4px;"><input type="date" class="re-j" value="'+_esc(p.j||'')+'" data-role="'+_esc(p.role||'')+'" style="font-size:12px;padding:2px 3px;border:1px solid #ddd;border-radius:3px;"></td>'
     + '<td style="padding:2px 4px;"><select class="re-s" style="font-size:12px;padding:3px 4px;border:1px solid #ddd;border-radius:3px;"><option value="재직"'+(isLeft?'':' selected')+'>재직</option><option value="퇴사"'+(isLeft?' selected':'')+'>퇴사</option></select></td>'
     + '<td style="padding:2px 4px;text-align:center;"><button onclick="this.closest(\'tr\').remove()" title="행 삭제" style="background:none;border:none;color:#c0392b;cursor:pointer;font-size:13px;">✕</button></td>'
     + '</tr>';
@@ -1723,7 +1852,7 @@ function openRosterEditModal() {
     + '<button onclick="openRosterCheckModal()" style="background:#fff;color:#666;border:1px solid #ccc;padding:5px 12px;border-radius:4px;font-size:12px;cursor:pointer;">취소</button>'
     + '<span style="flex:1;"></span><button onclick="downloadRoster()" style="background:#fff;color:#374151;border:1px solid #ccc;padding:5px 10px;border-radius:4px;font-size:12px;cursor:pointer;">📥 다운로드</button></div>';
   h += '<div style="max-height:360px;overflow:auto;border:1px solid #eee;border-radius:6px;"><table id="rosterEditTbl" style="width:100%;border-collapse:collapse;">'
-    + '<thead><tr style="background:#fafafa;position:sticky;top:0;"><th style="padding:5px;font-size:11px;color:#666;text-align:left;">업체</th><th style="padding:5px;font-size:11px;color:#666;text-align:left;">이름</th><th style="padding:5px;font-size:11px;color:#666;text-align:left;">이메일</th><th style="padding:5px;font-size:11px;color:#666;text-align:left;">상태</th><th style="width:30px;"></th></tr></thead><tbody>';
+    + '<thead><tr style="background:#fafafa;position:sticky;top:0;"><th style="padding:5px;font-size:11px;color:#666;text-align:left;">업체</th><th style="padding:5px;font-size:11px;color:#666;text-align:left;">이름</th><th style="padding:5px;font-size:11px;color:#666;text-align:left;">이메일</th><th style="padding:5px;font-size:11px;color:#666;text-align:left;">입사일</th><th style="padding:5px;font-size:11px;color:#666;text-align:left;">상태</th><th style="width:30px;"></th></tr></thead><tbody>';
   if (_roster.length) for (const p of _roster) h += _rosterEditRowHtml(p);
   else h += _rosterEditRowHtml({ v:'', name:'', email:'' });
   h += '</tbody></table></div>';
@@ -1744,7 +1873,8 @@ function rosterEditSave() {
     const sEl = tr.querySelector('.re-s');
     const left = sEl ? _isLeft(sEl.value) : false;
     if (!n && !e) continue;
-    out.push({ v: _vendor(v) || v || '미지정', vf: v, name: n, email: e, left });
+    const jEl = tr.querySelector('.re-j');
+    out.push({ v: _vendor(v) || v || '미지정', vf: v, name: n, email: e, left, j: jEl ? jEl.value : '', role: jEl ? (jEl.dataset.role||'') : '' });
   }
   _roster = out; saveRoster();
   alert('명단 ' + out.length + '명 저장되었습니다.');
@@ -2354,6 +2484,10 @@ function effSectionHtml() {
 
 // ── 수정 이력 (최신순) ──────────────────────────────────────────────
 const REVISIONS = [
+  { date: '2026-11-05', items: [
+    '미제출자 명단에 통합근무현황 파일 지원 — "통합근무현황" 시트에서 구분(G열)이 배관·용접사인 인원만 제출 대상(D=협력사, K=성명, CU=Daily Report e-mail). 입사일(CH열)+3일부터 미제출 판정, 그 전 작업일은 세지 않고 기간 내 판정일이 없으면 "입사 3일 유예"로 따로 표시. 엑셀 내보내기에 입사일·판정 시작일 추가(날짜별 매트릭스는 판정 전 "-")',
+    '미제출자 창에 "📁 폴더에서 최신 명단" 추가 — 통합근무현황 폴더를 한 번 고르면 기억하고, 파일명 날짜(YY.MM.DD)가 가장 늦은 파일로 명단 교체. 권한이 유지된 상태면 창을 열 때 새 파일을 자동 반영(Chrome·Edge). 명단은 브라우저에만 저장되며 서버로 올라가지 않음',
+  ]},
   { date: '2026-10-30', items: [
     '작업일 이상값 자동 제외 — 연도 오타(2016·2025·2027·2926·0202 등), 제출일보다 뒤의 미래 날짜, 제출일 120일 이전 날짜. 동기화 바 제외 내역에 "날짜이상" 건수 표시, 마우스를 올리면 제외된 행 목록 표시',
     '기간별 효율 추이에 선이 안 보이던 문제 수정 — "전체" 기간이 오타 날짜(0202년)부터 잡히던 문제, 기간이 하루면 점이 1개뿐이던 문제(짧은 기간은 최근 14일 추이로 표시)',
@@ -4375,8 +4509,9 @@ document.addEventListener('DOMContentLoaded', function() {
         const list = parseRosterWB(wb);
         if (!list.length) { alert('명단을 읽지 못했습니다. 열 이름에 업체/이름/이메일이 있는지 확인하세요.'); return; }
         _roster = list; saveRoster();
+        saveRosterMeta({ file: f.name, count: list.length, loadedAt: cstToday() });
         e.target.value = '';
-        alert('명단 ' + list.length + '명 등록 완료');
+        alert('명단 ' + list.length + '명 등록 완료' + (wb.Sheets['통합근무현황'] ? ' (통합근무현황: 배관·용접사)' : ''));
         openRosterCheckModal();
       } catch (err) { alert('명단 파일 처리 오류: ' + err.message); }
     };
