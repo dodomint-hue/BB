@@ -23,7 +23,7 @@ if (location.protocol === 'file:') {
 }
 </script>
 <script>
-window.BBTECH_BUILD = '2026-11-05.2';
+window.BBTECH_BUILD = '2026-11-05.3';
 if (typeof window.Chart === 'undefined') {
   window.Chart = class ChartFallback {
     constructor(ctx, config) {
@@ -1350,6 +1350,7 @@ const _isLeft = (s) => /퇴사|퇴직|resign|inactive|비활성|exit|종료/i.te
 // D=소속(협력사), K=성명, CH=입사일, CU=Daily Report e-mail. 입사일+3일부터 미제출 판정.
 const ROSTER_TARGET_ROLES = /^(배관|용접사)$/;
 const ROSTER_GRACE_DAYS = 3;
+const ROSTER_BB_LOOKBACK = 14;   // 공사·PRC 필터 시 사람의 공사 판별에 쓰는 기간 (기간 시작 며칠 전부터)
 let _rosterMeta = (function(){ try { const s = localStorage.getItem('bbtech_roster_meta'); return s ? JSON.parse(s) : null; } catch(e){ return null; } })();
 function saveRosterMeta(m) { _rosterMeta = m; try { localStorage.setItem('bbtech_roster_meta', JSON.stringify(m)); } catch(e){} }
 function _rosterDateStr(v) {
@@ -1559,9 +1560,41 @@ function openRosterCheckModal() {
   const nameCount = {};
   for (const p of activeRoster) { const n = _normName(p.name); if (n) nameCount[n] = (nameCount[n]||0) + 1; }
 
+  // [2026-11-05] 공사·PRC 필터: 사람의 '주 공사'·'주 PRC' = 기간 시작 14일 전 ~ 기간 끝 사이 보고 건수가 가장 많은 값.
+  //  (한 번이라도 보고한 기준이면 대부분이 양쪽에 다 잡혀 구분이 안 됨) 사람마다 하나로 분류되므로 1PATH+10K+미분류 = 전체.
+  //  설비 보고가 없는 사람은 '판별 불가'(미분류를 고를 때만 포함).
+  const bbOn = !!(state.capa || state.prc);
+  const bbUnknown = [];
+  let target = activeRoster, bbOut = 0;
+  if (bbOn) {
+    const wStart = addDaysStr(pStart, -ROSTER_BB_LOOKBACK);
+    const byE = new Map(), byN = new Map();
+    const bump = (m, k, cap, prc) => {
+      if (!k) return;
+      const o = m.get(k) || { n:0, cap:new Map(), prc:new Map() };
+      o.n++; mapAdd(o.cap, cap, 1); mapAdd(o.prc, prc, 1); m.set(k, o);
+    };
+    for (const r of (_stored||[])) {
+      if (!r || r.d < wStart || r.d > pEnd || !isValidEquip(r.e)) continue;
+      const b = bbListOf(r.e), cap = b ? b[0] : 'NONE', prc = (b && b[1]) ? b[1] : 'NONE';
+      bump(byE, r.email ? String(r.email).toLowerCase().trim() : '', cap, prc);
+      bump(byN, _normName(r.w), cap, prc);
+    }
+    const noneOk = (!state.capa || state.capa === 'NONE') && (!state.prc || state.prc === 'NONE');
+    target = activeRoster.filter(p => {
+      const pn = _normName(p.name), isDup = pn && nameCount[pn] >= 2;
+      // 이메일로 찾은 보고가 있으면 그것만, 없으면 이름(동명이인 제외)으로
+      const o = (p.email && byE.get(p.email)) || ((!isDup && pn) ? byN.get(pn) : null);
+      if (!o) { bbUnknown.push(p); return noneOk; }
+      const domCap = mostCommonMapKey(o.cap, 'NONE'), domPrc = mostCommonMapKey(o.prc, 'NONE');
+      return (!state.capa || domCap === state.capa) && (!state.prc || domPrc === state.prc);
+    });
+    bbOut = activeRoster.length - target.length;
+  }
+
   // 사람별: 보고한 날 / 미제출한 날 계산 (재직자만)
   const submitted = [], missing = [], grace = [];
-  for (const p of activeRoster) {
+  for (const p of target) {
     const pe = p.email, pn = _normName(p.name);
     const isDup = pn && nameCount[pn] >= 2;       // 동명이인 → 이름 보조 사용 안 함
     const missDates = [];
@@ -1584,7 +1617,7 @@ function openRosterCheckModal() {
   missing.sort((x,y) => y.missCount - x.missCount);
   const periodTxt = (pStart===pEnd) ? pStart : (pStart + ' ~ ' + pEnd);
   document.getElementById('hmModalSub').textContent =
-    '기간 ' + periodTxt + ' · 작업일 ' + workdays.length + '일' + sunTxt + ' · 재직 ' + activeRoster.length + '명' + (leftCount ? ' (퇴사 ' + leftCount + '명 제외)' : '') + (grace.length ? ' · 입사 ' + ROSTER_GRACE_DAYS + '일 유예 ' + grace.length + '명' : '') + ' · 전일제출 ' + submitted.length + '명 · 미제출(일부 포함) ' + missing.length + '명';
+    '기간 ' + periodTxt + ' · 작업일 ' + workdays.length + '일' + sunTxt + (bbOn ? ' · [' + bbFilterLabel() + '] 대상 ' + target.length + '명 / 재직 ' + activeRoster.length + '명' : ' · 재직 ' + activeRoster.length + '명') + (leftCount ? ' (퇴사 ' + leftCount + '명 제외)' : '') + (grace.length ? ' · 입사 ' + ROSTER_GRACE_DAYS + '일 유예 ' + grace.length + '명' : '') + ' · 전일제출 ' + submitted.length + '명 · 미제출(일부 포함) ' + missing.length + '명';
 
   // 업체별 미제출 그룹
   const byV = {};
@@ -1632,6 +1665,12 @@ function openRosterCheckModal() {
       h += '</tbody></table></div>';
     }
   }
+  if (bbOn) {
+    h += '<div style="margin-top:12px;font-size:11px;color:#1f6f8b;background:#eef5fb;border-radius:6px;padding:6px 8px;">상단 필터 <b>' + esc(bbFilterLabel()) + '</b> 적용 — 사람의 공사·PRC는 '
+      + esc(addDaysStr(pStart, -ROSTER_BB_LOOKBACK)) + ' ~ ' + esc(pEnd) + ' 사이 보고 건수가 가장 많은 공사·PRC(주 공사)로 사람마다 하나로 분류. 제외 ' + bbOut + '명'
+      + (bbUnknown.length ? ' · 설비 보고가 없어 판별 불가 ' + bbUnknown.length + '명' + ((state.capa === 'NONE' || state.prc === 'NONE') ? '(미분류에 포함)' : '(제외됨, 전체로 보면 확인 가능)') + ': ' + bbUnknown.slice(0, 40).map(p => esc((p.v||'') + ' ' + (p.name||''))).join(', ') + (bbUnknown.length > 40 ? ' 외 ' + (bbUnknown.length - 40) + '명' : '') : '')
+      + '</div>';
+  }
   // 입사 3일 유예자 (기간 내 판정 대상 작업일 없음)
   if (grace.length) {
     h += '<div style="margin-top:12px;font-size:11px;color:#777;background:#f7f8fa;border-radius:6px;padding:6px 8px;"><b>입사 '+ROSTER_GRACE_DAYS+'일 유예 '+grace.length+'명</b> (입사일+'+ROSTER_GRACE_DAYS+'일부터 판정): '
@@ -1670,7 +1709,7 @@ function exportMissingXlsx() {
     s2.push([p.vf||p.v||'', p.name||''].concat(wd.map(d => (p.dueFrom && d < p.dueFrom) ? '-' : missSet.has(d) ? 'X' : 'O')));
   }
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(s2), '날짜별 매트릭스');
-  XLSX.writeFile(wb, 'BBTECH_미제출자_'+pStart+'_'+pEnd+'.xlsx');
+  XLSX.writeFile(wb, 'BBTECH_미제출자_'+pStart+'_'+pEnd+(bbFilterLabel() ? '_' + bbFilterLabel().replace(/\s*·\s*/g, '_') : '')+'.xlsx');
 }
 
 function _wrapTextLines(ctx, text, maxW) {
@@ -1731,7 +1770,7 @@ function exportMissingPng() {
   ctx.fillStyle = '#ffffff';
   ctx.font = 'bold 20px Arial'; ctx.fillText('BBTECH T-PJT 레포트 미제출자', padX, 34);
   ctx.font = '13px Arial'; ctx.fillStyle = '#cdd7e3';
-  ctx.fillText('기간 ' + periodTxt + ' · 작업일 ' + wdN + '일(일요일 제외) · 미제출 ' + _missingCache.length + '명', padX, 56);
+  ctx.fillText('기간 ' + periodTxt + (bbFilterLabel() ? ' · ' + bbFilterLabel() : '') + ' · 작업일 ' + wdN + '일(일요일 제외) · 미제출 ' + _missingCache.length + '명', padX, 56);
 
   for (const op of ops) {
     if (op.t === 'vh') {
@@ -1756,7 +1795,7 @@ function exportMissingPng() {
     }
   }
 
-  const fn = 'BBTECH_미제출자_' + pStart + '_' + pEnd + '.png';
+  const fn = 'BBTECH_미제출자_' + pStart + '_' + pEnd + (bbFilterLabel() ? '_' + bbFilterLabel().replace(/\s*·\s*/g, '_') : '') + '.png';
   const dl = (url) => { const a2 = document.createElement('a'); a2.href = url; a2.download = fn; document.body.appendChild(a2); a2.click(); a2.remove(); };
   if (cv.toBlob) cv.toBlob((blob) => { const url = URL.createObjectURL(blob); dl(url); setTimeout(() => URL.revokeObjectURL(url), 1000); }, 'image/png');
   else dl(cv.toDataURL('image/png'));
@@ -1917,6 +1956,8 @@ function computeEffData(range) {
   const baseDate = addDaysStr(pStart, -1);
   const catEl = document.getElementById('dcCat');
   const effCat = (catEl && catEl.value) ? catEl.value : 'ALL';
+  // [2026-11-05] 공사·PRC 필터: 진척·설치공수는 해당 설비만, 인원은 기간 중 해당 설비 작업이 있는 사람만 (출근공수는 그 사람의 전체 출근)
+  const bbOn = !!(state.capa || state.prc);
 
   // 1) 출근공수는 기간 내 모든 업무를 보존하고, 설치 효율공수만 선택 공정에 맞춰 분리한다.
   const workforceMap = new Map();
@@ -1931,6 +1972,7 @@ function computeEffData(range) {
     });
     const o = workforceMap.get(key);
     const md = Math.max(0, Number(r.m) || 0);
+    if (bbOn && isValidEquip(r.e) && bbPassFilter(r.e)) o.bbHit = true;
     mapAdd(o.names, String(r.w || '').trim(), 1);
     if (md > 0) { o.dates.add(r.d); o.attendanceMd += md; }
     const wt = workTypeOf(r);
@@ -1938,7 +1980,7 @@ function computeEffData(range) {
       const c = normalizeCategory(r.c);
       if (c && isValidEquip(r.e)) {
         o.installAllMd += md;
-        if (effCat === 'ALL' || c === effCat) {
+        if ((effCat === 'ALL' || c === effCat) && bbPassFilter(r.e)) {
           o.measuredMd += md; o.measuredDates.add(r.d); o.eqSet.add(r.e); o.cats.add(c); mapAdd(o.catMd, c, md);
         }
       } else o.otherMd += md;
@@ -1960,6 +2002,7 @@ function computeEffData(range) {
     if (!r || !r.w || !r.d || r.d > pEnd || workTypeOf(r) !== 'measured') continue;
     if (!isValidEquip(r.e) || typeof r.p !== 'number') continue;
     const c = normalizeCategory(r.c); if (!c || (effCat !== 'ALL' && c !== effCat)) continue;
+    if (!bbPassFilter(r.e)) continue;
     const k = r.e + '|' + c + '|' + (r.ph || '');
     if (!cells.has(k)) cells.set(k, { key:k, e:r.e, c, ph:r.ph || '', rs:[] });
     cells.get(k).rs.push(r);
@@ -2040,7 +2083,7 @@ function computeEffData(range) {
     for (const r of cell.rs) if (r.d >= pStart && r.d <= pEnd) mapAdd(eq.vendors, r.v || '기타', Number(r.m) || 0);
   }
 
-  const workforce = [...workforceMap.values()].map(o => {
+  const workforce = [...workforceMap.values()].filter(o => !bbOn || o.bbHit).map(o => {
     const w = mostCommonMapKey(o.names, '미상');
     const measuredShare = o.attendanceMd > 0 ? o.measuredMd / o.attendanceMd : 0;
     const nonMeasuredMd = o.weldingMd + o.externalMd + o.supportMd + o.otherMd;
@@ -2215,7 +2258,7 @@ function exportEffXlsx() {
     o.absorb == null ? '' : r1(o.absorb*100), r1(o.adjustedAbsorb), r1(o.adjustedIndex), r1(o.confidence*100),
     r1(o.measuredMd), o.measuredDays, r1(o.measuredShare*100), r1(o.credit*100), r1(o.eff)
   ]));
-  const baseName = 'BBTECH_인력성과_' + d.pStart + '_' + d.pEnd;
+  const baseName = 'BBTECH_인력성과_' + d.pStart + '_' + d.pEnd + (bbFilterLabel() ? '_' + bbFilterLabel().replace(/\s*·\s*/g, '_') : '');
   if (typeof XLSX === 'undefined') {
     downloadCsv(baseName + '.csv', s2);
     alert('엑셀 모듈 연결이 차단되어 CSV로 저장했습니다. 엑셀에서 바로 열 수 있습니다.');
@@ -2464,7 +2507,7 @@ function effSectionHtml() {
   const f = n => (Math.round((Number(n)||0)*10)/10).toFixed(1);
   return '<div id="effAnalysisSection" style="border:1px solid #e5e7eb;border-radius:10px;padding:14px 16px;margin-top:18px;background:#fff;">'
     + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;">'
-    +   '<span style="font-size:14px;font-weight:800;color:#222;">⚡ 효율 분석</span>'
+    +   '<span style="font-size:14px;font-weight:800;color:#222;">⚡ 효율 분석</span>' + (bbFilterLabel() ? '<span style="font-size:11px;background:#e8f1fb;color:#1f6f8b;border-radius:10px;padding:1px 8px;font-weight:700;">'+bbFilterLabel()+'</span>' : '')
     +   '<span style="font-size:11px;color:#888;">검증된 진척 증가를 설치공수 비율로 배분 · 효율 = 검증 배분진척 ÷ 설치공수</span>'
     +   '<button onclick="exportEffXlsx()" style="margin-left:auto;background:#1f7a3d;border:none;color:#fff;padding:6px 14px;border-radius:5px;font-size:12px;cursor:pointer;">📥 인력 성과 다운로드</button>'
     + '</div>'
@@ -2489,6 +2532,7 @@ function effSectionHtml() {
 // ── 수정 이력 (최신순) ──────────────────────────────────────────────
 const REVISIONS = [
   { date: '2026-11-05', items: [
+    '[.3] 공사·PRC 필터를 미제출자·효율 분석에도 적용 — 미제출자: 사람마다 기간 시작 14일 전~기간 끝 사이 보고 건수가 가장 많은 공사·PRC(주 공사)로 분류해 해당 인원만 판정(설비 보고가 없는 사람은 "판별 불가"로 따로 표시, 미분류 선택 시 포함). 효율 분석: 진척·설치공수는 해당 설비만, 인원은 기간 중 해당 설비 작업이 있는 사람만(출근공수는 그 사람의 전체 출근). 기간 비교 표도 해당 설비만. 엑셀·이미지 파일명에 필터 표시',
     '[.2] 상단 필터에 공사·PRC 추가 — Daily Report "BB_List" 시트 D열(Capa: 1PATH = 1차 공사, 10K = 2차 공사)과 E열(PRC: Main/Aux/Infra) 기준, 기본값 전체. KPI·공종/업체 차트·공정 단계 현황·TAT·SL1+/SL2 일정에 함께 적용(TAT·SL 제목에 적용 중인 필터 표시). BB_List에 없는 설비명은 "미분류", 설비명 없는 보고는 공사·PRC를 고르면 빠짐. 공사·PRC 값은 sl-schedule.js(일정_가져오기)에 함께 생성',
     '미제출자 명단에 통합근무현황 파일 지원 — "통합근무현황" 시트에서 구분(G열)이 배관·용접사인 인원만 제출 대상(D=협력사, K=성명, CU=Daily Report e-mail). 입사일(CH열)+3일부터 미제출 판정, 그 전 작업일은 세지 않고 기간 내 판정일이 없으면 "입사 3일 유예"로 따로 표시. 엑셀 내보내기에 입사일·판정 시작일 추가(날짜별 매트릭스는 판정 전 "-")',
     '미제출자 창에 "📁 폴더에서 최신 명단" 추가 — 통합근무현황 폴더를 한 번 고르면 기억하고, 파일명 날짜(YY.MM.DD)가 가장 늦은 파일로 명단 교체. 권한이 유지된 상태면 창을 열 때 새 파일을 자동 반영(Chrome·Edge). 명단은 브라우저에만 저장되며 서버로 올라가지 않음',
@@ -2801,6 +2845,7 @@ function dcSetFloor(f) {
 function renderDailyCompare(recs, dateA, dateB) {
   const el = document.getElementById('dailyCompareTable');
   if (!el) return;
+  if (state.capa || state.prc) recs = (recs || []).filter(r => bbPassFilter(r.e));   // [2026-11-05] 공사·PRC 필터
 
   const today = cstToday();
 
@@ -5199,8 +5244,15 @@ function setupFilters() {
 
   vendorSel.addEventListener('change', e => { state.vendor = e.target.value; render(); });
   const capaSel = document.getElementById('filterCapa'), prcSel = document.getElementById('filterPrc');
-  capaSel.addEventListener('change', e => { state.capa = e.target.value; render(); });
-  prcSel.addEventListener('change',  e => { state.prc = e.target.value; render(); });
+  const bbRerender = () => {
+    render();
+    const a = document.getElementById('dcDateA'), b = document.getElementById('dcDateB');
+    try { renderDailyCompare(_stored, a ? a.value || null : null, b ? b.value || cstToday() : cstToday()); } catch (e) { console.error('dc', e); }
+    const ov = document.getElementById('hmModalOverlay');
+    if (ov && ov.style.display === 'flex' && /미제출자/.test(document.getElementById('hmModalTitle').textContent)) openRosterCheckModal();
+  };
+  capaSel.addEventListener('change', e => { state.capa = e.target.value; bbRerender(); });
+  prcSel.addEventListener('change',  e => { state.prc = e.target.value; bbRerender(); });
   catSel.addEventListener('change',    e => { state.category = e.target.value; render(); });
   yearSel.addEventListener('change',   e => { state.year = e.target.value; render(); });
   ds.addEventListener('change',        e => { state.dateStart = e.target.value; render(); });
@@ -5246,7 +5298,9 @@ function setupFilters() {
 
   document.getElementById('filterReset').addEventListener('click', () => {
     state.vendor = ''; state.category = ''; state.equip = ''; state.worker = '';
+    const bbWas = !!(state.capa || state.prc);
     state.capa = ''; state.prc = ''; capaSel.value = ''; prcSel.value = '';
+    if (bbWas) setTimeout(bbRerender, 0);
     state.year = '';
     state.dateStart = ''; state.dateEnd = '';
     state.view = 'main'; state.detailKey = '';
